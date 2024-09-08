@@ -11,9 +11,10 @@ const HEIGHT = 720;
 const VK_VALIDATION_LAYERS_NAMES = [_][]const u8{"VK_LAYER_KHRONOS_validation"};
 const VK_ADDITIONAL_EXTENSIONS_NAMES = [_][]const u8{"VK_EXT_debug_utils"};
 
+allocator: Allocator,
 window: *sdl.SDL_Window,
-vk_instance: vk.VkInstance,
-vk_debug_messanger: vk.VkDebugUtilsMessengerEXT,
+vk_instance: vk.VkInstance = undefined,
+vk_debug_messanger: vk.VkDebugUtilsMessengerEXT = undefined,
 
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
@@ -44,18 +45,19 @@ pub fn init(allocator: Allocator) !Self {
         std.log.info("Required SDL extension: {s}", .{e});
     }
 
-    const vk_instance = try Self.create_vk_instance(allocator, sdl_extensions);
-    const vk_debug_messanger = try Self.create_debug_messanger(vk_instance);
-
-    return .{
+    var self = Self{
+        .allocator = allocator,
         .window = window,
-        .vk_instance = vk_instance,
-        .vk_debug_messanger = vk_debug_messanger,
     };
+
+    try self.create_vk_instance(sdl_extensions);
+    try self.create_debug_messanger();
+
+    return self;
 }
 
 pub fn deinit(self: *Self) void {
-    Self.destroy_debug_messanger(self.vk_instance, self.vk_debug_messanger) catch {
+    self.destroy_debug_messanger() catch {
         std.log.err("Could not destroy debug messanger", .{});
     };
     vk.vkDestroyInstance(self.vk_instance, null);
@@ -76,8 +78,8 @@ pub fn run(self: *Self) void {
     _ = self;
 }
 
-pub fn create_vk_instance(allocator: Allocator, sdl_extensions: [][*c]const u8) !vk.VkInstance {
-    var arena = std.heap.ArenaAllocator.init(allocator);
+pub fn create_vk_instance(self: *Self, sdl_extensions: [][*c]const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
     defer arena.deinit();
     const arena_allocator = arena.allocator();
 
@@ -161,9 +163,7 @@ pub fn create_vk_instance(allocator: Allocator, sdl_extensions: [][*c]const u8) 
         .enabledLayerCount = @as(u32, @intCast(VK_VALIDATION_LAYERS_NAMES.len)),
     };
 
-    var instance: vk.VkInstance = undefined;
-    try vk.check_result(vk.vkCreateInstance(&instance_create_info, null, &instance));
-    return instance;
+    try vk.check_result(vk.vkCreateInstance(&instance_create_info, null, &self.vk_instance));
 }
 
 pub fn get_vk_func(comptime Fn: type, instance: vk.VkInstance, name: [*c]const u8) !Fn {
@@ -180,8 +180,8 @@ pub fn get_vk_func(comptime Fn: type, instance: vk.VkInstance, name: [*c]const u
     }
 }
 
-pub fn create_debug_messanger(instance: vk.VkInstance) !vk.VkDebugUtilsMessengerEXT {
-    const create_fn = (try Self.get_vk_func(vk.PFN_vkCreateDebugUtilsMessengerEXT, instance, "vkCreateDebugUtilsMessengerEXT")).?;
+pub fn create_debug_messanger(self: *Self) !void {
+    const create_fn = (try get_vk_func(vk.PFN_vkCreateDebugUtilsMessengerEXT, self.vk_instance, "vkCreateDebugUtilsMessengerEXT")).?;
     const create_info = vk.VkDebugUtilsMessengerCreateInfoEXT{
         .sType = vk.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
         .messageSeverity = vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
@@ -190,17 +190,15 @@ pub fn create_debug_messanger(instance: vk.VkInstance) !vk.VkDebugUtilsMessenger
         .messageType = vk.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
             vk.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
             vk.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-        .pfnUserCallback = Self.debug_callback,
+        .pfnUserCallback = debug_callback,
         .pUserData = null,
     };
-    var messanger: vk.VkDebugUtilsMessengerEXT = undefined;
-    try vk.check_result(create_fn(instance, &create_info, null, &messanger));
-    return messanger;
+    try vk.check_result(create_fn(self.vk_instance, &create_info, null, &self.vk_debug_messanger));
 }
 
-pub fn destroy_debug_messanger(instance: vk.VkInstance, messanger: vk.VkDebugUtilsMessengerEXT) !void {
-    const destroy_fn = (try Self.get_vk_func(vk.PFN_vkDestroyDebugUtilsMessengerEXT, instance, "vkDestroyDebugUtilsMessengerEXT")).?;
-    destroy_fn(instance, messanger, null);
+pub fn destroy_debug_messanger(self: *Self) !void {
+    const destroy_fn = (try get_vk_func(vk.PFN_vkDestroyDebugUtilsMessengerEXT, self.vk_instance, "vkDestroyDebugUtilsMessengerEXT")).?;
+    destroy_fn(self.vk_instance, self.vk_debug_messanger, null);
 }
 
 pub fn debug_callback(
