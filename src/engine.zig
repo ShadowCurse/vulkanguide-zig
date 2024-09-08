@@ -13,6 +13,7 @@ const VK_ADDITIONAL_EXTENSIONS_NAMES = [_][]const u8{"VK_EXT_debug_utils"};
 
 window: *sdl.SDL_Window,
 vk_instance: vk.VkInstance,
+vk_debug_messanger: vk.VkDebugUtilsMessengerEXT,
 
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
@@ -44,15 +45,19 @@ pub fn init(allocator: Allocator) !Self {
     }
 
     const vk_instance = try Self.create_vk_instance(allocator, sdl_extensions);
+    const vk_debug_messanger = try Self.create_debug_messanger(vk_instance);
 
     return .{
         .window = window,
         .vk_instance = vk_instance,
+        .vk_debug_messanger = vk_debug_messanger,
     };
 }
 
 pub fn deinit(self: *Self) void {
-    vk.vkDestroyInstance(self.vk_instance);
+    Self.destroy_debug_messanger(self.vk_instance, self.vk_debug_messanger) catch {
+        std.log.err("Could not destroy debug messanger", .{});
+    };
     vk.vkDestroyInstance(self.vk_instance, null);
     sdl.SDL_DestroyWindow(self.window);
 }
@@ -159,4 +164,65 @@ pub fn create_vk_instance(allocator: Allocator, sdl_extensions: [][*c]const u8) 
     var instance: vk.VkInstance = undefined;
     try vk.check_result(vk.vkCreateInstance(&instance_create_info, null, &instance));
     return instance;
+}
+
+pub fn get_vk_func(comptime Fn: type, instance: vk.VkInstance, name: [*c]const u8) !Fn {
+    if (sdl.SDL_Vulkan_GetVkGetInstanceProcAddr()) |f| {
+        const get_proc_addr = @as(vk.PFN_vkGetInstanceProcAddr, @ptrCast(f)).?;
+        if (get_proc_addr(instance, name)) |func| {
+            return @ptrCast(func);
+        } else {
+            return error.VKGetInstanceProcAddr;
+        }
+    } else {
+        std.log.err("Cound not create debug messanger", .{});
+        return error.SDLGetInstanceProcAddr;
+    }
+}
+
+pub fn create_debug_messanger(instance: vk.VkInstance) !vk.VkDebugUtilsMessengerEXT {
+    const create_fn = (try Self.get_vk_func(vk.PFN_vkCreateDebugUtilsMessengerEXT, instance, "vkCreateDebugUtilsMessengerEXT")).?;
+    const create_info = vk.VkDebugUtilsMessengerCreateInfoEXT{
+        .sType = vk.VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+        .messageSeverity = vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT |
+            vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+            vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT,
+        .messageType = vk.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+            vk.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+            vk.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
+        .pfnUserCallback = Self.debug_callback,
+        .pUserData = null,
+    };
+    var messanger: vk.VkDebugUtilsMessengerEXT = undefined;
+    try vk.check_result(create_fn(instance, &create_info, null, &messanger));
+    return messanger;
+}
+
+pub fn destroy_debug_messanger(instance: vk.VkInstance, messanger: vk.VkDebugUtilsMessengerEXT) !void {
+    const destroy_fn = (try Self.get_vk_func(vk.PFN_vkDestroyDebugUtilsMessengerEXT, instance, "vkDestroyDebugUtilsMessengerEXT")).?;
+    destroy_fn(instance, messanger, null);
+}
+
+pub fn debug_callback(
+    severity: vk.VkDebugUtilsMessageSeverityFlagBitsEXT,
+    msg_type: vk.VkDebugUtilsMessageTypeFlagsEXT,
+    data: ?*const vk.VkDebugUtilsMessengerCallbackDataEXT,
+    _: ?*anyopaque,
+) callconv(.C) vk.VkBool32 {
+    const sev = switch (severity) {
+        vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT => "error",
+        vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT => "warning",
+        vk.VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT => "verbose",
+        else => "unknown",
+    };
+    const ty = switch (msg_type) {
+        vk.VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT => "general",
+        vk.VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT => "validation",
+        vk.VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT => "performance",
+        else => "unknown",
+    };
+    const msg: [*c]const u8 = if (data) |d| d.pMessage else "empty";
+
+    std.log.debug("[DEBUG MSG][{s}][{s}]: {s}", .{ sev, ty, msg });
+    return vk.VK_FALSE;
 }
