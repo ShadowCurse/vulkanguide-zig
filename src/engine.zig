@@ -28,6 +28,14 @@ const LogicalDevice = struct {
     transfer_queue: vk.VkQueue,
 };
 
+const Swapchain = struct {
+    swap_chain: vk.VkSwapchainKHR,
+    images: []vk.VkImage,
+    image_views: []vk.VkImageView,
+    format: vk.VkFormat,
+    extent: vk.VkExtent2D,
+};
+
 allocator: Allocator,
 window: *sdl.SDL_Window,
 surface: vk.VkSurfaceKHR = undefined,
@@ -35,6 +43,7 @@ vk_instance: vk.VkInstance = undefined,
 vk_debug_messanger: vk.VkDebugUtilsMessengerEXT = undefined,
 vk_physical_device: PhysicalDevice = undefined,
 vk_logical_device: LogicalDevice = undefined,
+vk_swap_chain: Swapchain = undefined,
 
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
@@ -81,11 +90,19 @@ pub fn init(allocator: Allocator) !Self {
 
     try self.select_physical_device();
     try self.create_logical_device();
+    try self.create_swap_chain();
 
     return self;
 }
 
 pub fn deinit(self: *Self) void {
+    for (self.vk_swap_chain.image_views) |view| {
+        vk.vkDestroyImageView(self.vk_logical_device.device, view, null);
+    }
+    vk.vkDestroySwapchainKHR(self.vk_logical_device.device, self.vk_swap_chain.swap_chain, null);
+    self.allocator.free(self.vk_swap_chain.images);
+    self.allocator.free(self.vk_swap_chain.image_views);
+
     vk.vkDestroyDevice(self.vk_logical_device.device, null);
     vk.vkDestroySurfaceKHR(self.vk_instance, self.surface, null);
     self.destroy_debug_messanger() catch {
@@ -433,4 +450,120 @@ pub fn create_logical_device(self: *Self) !void {
         0,
         &self.vk_logical_device.transfer_queue,
     );
+}
+
+pub fn create_swap_chain(self: *Self) !void {
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var surface_capabilities: vk.VkSurfaceCapabilitiesKHR = undefined;
+    try vk.check_result(vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(self.vk_physical_device.device, self.surface, &surface_capabilities));
+
+    var device_surface_format_count: u32 = 0;
+    try vk.check_result(vk.vkGetPhysicalDeviceSurfaceFormatsKHR(
+        self.vk_physical_device.device,
+        self.surface,
+        &device_surface_format_count,
+        null,
+    ));
+    const device_surface_formats = try arena_allocator.alloc(vk.VkSurfaceFormatKHR, device_surface_format_count);
+    try vk.check_result(vk.vkGetPhysicalDeviceSurfaceFormatsKHR(
+        self.vk_physical_device.device,
+        self.surface,
+        &device_surface_format_count,
+        device_surface_formats.ptr,
+    ));
+    var found_format: ?vk.VkSurfaceFormatKHR = null;
+    for (device_surface_formats) |format| {
+        if (format.format == vk.VK_FORMAT_B8G8R8A8_UNORM and format.colorSpace == vk.VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+            found_format = format;
+            break;
+        }
+    }
+    if (found_format == null) {
+        return error.SurfaceFormatNotFound;
+    }
+    const surface_format = found_format.?;
+
+    var swap_chain_extent: vk.VkExtent2D = surface_capabilities.currentExtent;
+    if (swap_chain_extent.width == std.math.maxInt(u32)) {
+        var w: i32 = 0;
+        var h: i32 = 0;
+        sdl.SDL_GetWindowSize(self.window, &w, &h);
+        const window_w: u32 = @intCast(w);
+        const window_h: u32 = @intCast(h);
+        swap_chain_extent.width = @min(@max(window_w, surface_capabilities.minImageExtent.width), surface_capabilities.maxImageExtent.width);
+        swap_chain_extent.height = @min(@max(window_h, surface_capabilities.minImageExtent.height), surface_capabilities.maxImageExtent.height);
+    }
+
+    const create_info = vk.VkSwapchainCreateInfoKHR{
+        .sType = vk.VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+        .surface = self.surface,
+        .minImageCount = surface_capabilities.minImageCount + 1,
+        .imageFormat = surface_format.format,
+        .imageColorSpace = surface_format.colorSpace,
+        .imageExtent = swap_chain_extent,
+        .imageArrayLayers = 1,
+        .imageUsage = vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .preTransform = surface_capabilities.currentTransform,
+        .compositeAlpha = vk.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .presentMode = vk.VK_PRESENT_MODE_FIFO_KHR,
+        .clipped = vk.VK_TRUE,
+        .oldSwapchain = null,
+    };
+
+    try vk.check_result(vk.vkCreateSwapchainKHR(self.vk_logical_device.device, &create_info, null, &self.vk_swap_chain.swap_chain));
+    self.vk_swap_chain.format = surface_format.format;
+    self.vk_swap_chain.extent = swap_chain_extent;
+
+    //
+    // fmt.println("Getting swap chain images")
+    var swap_chain_images_count: u32 = 0;
+    try vk.check_result(vk.vkGetSwapchainImagesKHR(
+        self.vk_logical_device.device,
+        self.vk_swap_chain.swap_chain,
+        &swap_chain_images_count,
+        null,
+    ));
+    self.vk_swap_chain.images = try self.allocator.alloc(vk.VkImage, swap_chain_images_count);
+    errdefer self.allocator.free(self.vk_swap_chain.images);
+    try vk.check_result(vk.vkGetSwapchainImagesKHR(
+        self.vk_logical_device.device,
+        self.vk_swap_chain.swap_chain,
+        &swap_chain_images_count,
+        self.vk_swap_chain.images.ptr,
+    ));
+
+    self.vk_swap_chain.image_views = try self.allocator.alloc(vk.VkImageView, swap_chain_images_count);
+    errdefer self.allocator.free(self.vk_swap_chain.image_views);
+    for (self.vk_swap_chain.images, self.vk_swap_chain.image_views) |image, *view| {
+        const view_create_info = vk.VkImageViewCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+            .image = image,
+            .viewType = vk.VK_IMAGE_VIEW_TYPE_2D,
+            .format = self.vk_swap_chain.format,
+            .components = .{
+                .r = vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .g = vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .b = vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+                .a = vk.VK_COMPONENT_SWIZZLE_IDENTITY,
+            },
+            .subresourceRange = .{
+                .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        };
+        try vk.check_result(
+            vk.vkCreateImageView(
+                self.vk_logical_device.device,
+                &view_create_info,
+                null,
+                view,
+            ),
+        );
+    }
 }
