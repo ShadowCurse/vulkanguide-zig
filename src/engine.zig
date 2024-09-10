@@ -36,6 +36,14 @@ const Swapchain = struct {
     extent: vk.VkExtent2D,
 };
 
+const Commands = struct {
+    pool: vk.VkCommandPool,
+    buffer: vk.VkCommandBuffer,
+};
+
+const FRAMES = 2;
+current_frame: u32 = 0,
+
 allocator: Allocator,
 window: *sdl.SDL_Window,
 surface: vk.VkSurfaceKHR = undefined,
@@ -44,6 +52,7 @@ vk_debug_messanger: vk.VkDebugUtilsMessengerEXT = undefined,
 vk_physical_device: PhysicalDevice = undefined,
 vk_logical_device: LogicalDevice = undefined,
 vk_swap_chain: Swapchain = undefined,
+vk_commands: [FRAMES]Commands = undefined,
 
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
@@ -96,6 +105,12 @@ pub fn init(allocator: Allocator) !Self {
 }
 
 pub fn deinit(self: *Self) void {
+    _ = vk.vkDeviceWaitIdle(self.vk_logical_device.device);
+
+    for (self.vk_commands) |command| {
+        vk.vkDestroyCommandPool(self.vk_logical_device.device, command.pool, null);
+    }
+
     for (self.vk_swap_chain.image_views) |view| {
         vk.vkDestroyImageView(self.vk_logical_device.device, view, null);
     }
@@ -565,5 +580,23 @@ pub fn create_swap_chain(self: *Self) !void {
                 view,
             ),
         );
+    }
+}
+
+pub fn create_commands(self: *Self) !void {
+    const pool_create_info = vk.VkCommandPoolCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = vk.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = self.vk_physical_device.graphics_queue_family,
+    };
+    for (self.vk_commands) |*commands| {
+        try vk.check_result(vk.vkCreateCommandPool(self.vk_logical_device.device, &pool_create_info, null, commands.pool));
+        const allocate_info = vk.VkCommandBufferAllocateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+            .commandPool = commands.pool,
+            .level = vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+            .commandBufferCount = 1,
+        };
+        try vk.check_result(vk.vkAllocateCommandBuffers(self.vk_logical_device.device, &allocate_info, commands.buffer));
     }
 }
