@@ -526,7 +526,7 @@ pub fn create_swap_chain(self: *Self) !void {
         .imageColorSpace = surface_format.colorSpace,
         .imageExtent = swap_chain_extent,
         .imageArrayLayers = 1,
-        .imageUsage = vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+        .imageUsage = vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .preTransform = surface_capabilities.currentTransform,
         .compositeAlpha = vk.VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
         .presentMode = vk.VK_PRESENT_MODE_FIFO_KHR,
@@ -538,8 +538,6 @@ pub fn create_swap_chain(self: *Self) !void {
     self.vk_swap_chain.format = surface_format.format;
     self.vk_swap_chain.extent = swap_chain_extent;
 
-    //
-    // fmt.println("Getting swap chain images")
     var swap_chain_images_count: u32 = 0;
     try vk.check_result(vk.vkGetSwapchainImagesKHR(
         self.vk_logical_device.device,
@@ -595,22 +593,22 @@ pub fn create_commands(self: *Self) !void {
         .flags = vk.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
         .queueFamilyIndex = self.vk_physical_device.graphics_queue_family,
     };
-    for (self.vk_commands) |*commands| {
-        try vk.check_result(vk.vkCreateCommandPool(self.vk_logical_device.device, &pool_create_info, null, commands.pool));
+    for (&self.vk_commands) |*commands| {
+        try vk.check_result(vk.vkCreateCommandPool(self.vk_logical_device.device, &pool_create_info, null, &commands.pool));
         const allocate_info = vk.VkCommandBufferAllocateInfo{
             .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .commandPool = commands.pool,
             .level = vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
             .commandBufferCount = 1,
         };
-        try vk.check_result(vk.vkAllocateCommandBuffers(self.vk_logical_device.device, &allocate_info, commands.buffer));
+        try vk.check_result(vk.vkAllocateCommandBuffers(self.vk_logical_device.device, &allocate_info, &commands.buffer));
         const fence_create_info = vk.VkFenceCreateInfo{
             .sType = vk.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
             .flags = vk.VK_FENCE_CREATE_SIGNALED_BIT,
         };
         try vk.check_result(vk.vkCreateFence(self.vk_logical_device.device, &fence_create_info, null, &commands.render_fence));
         const semaphore_creaet_info = vk.VkSemaphoreCreateInfo{
-            .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+            .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
         };
         try vk.check_result(vk.vkCreateSemaphore(self.vk_logical_device.device, &semaphore_creaet_info, null, &commands.render_semaphore));
         try vk.check_result(vk.vkCreateSemaphore(self.vk_logical_device.device, &semaphore_creaet_info, null, &commands.swap_chain_semaphore));
