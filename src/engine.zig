@@ -67,7 +67,7 @@ pub fn init(allocator: Allocator) !Self {
         sdl.SDL_WINDOWPOS_UNDEFINED,
         WIDTH,
         HEIGHT,
-        sdl.SDL_WINDOW_VULKAN | sdl.SDL_WINDOW_RESIZABLE,
+        sdl.SDL_WINDOW_VULKAN,
     ) orelse {
         return error.SDLCreateWindow;
     };
