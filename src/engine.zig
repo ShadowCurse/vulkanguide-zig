@@ -39,6 +39,9 @@ const Swapchain = struct {
 const Commands = struct {
     pool: vk.VkCommandPool,
     buffer: vk.VkCommandBuffer,
+    swap_chain_semaphore: vk.VkSemaphore,
+    render_semaphore: vk.VkSemaphore,
+    render_fence: vk.VkFence,
 };
 
 const FRAMES = 2;
@@ -108,6 +111,9 @@ pub fn deinit(self: *Self) void {
     _ = vk.vkDeviceWaitIdle(self.vk_logical_device.device);
 
     for (self.vk_commands) |command| {
+        vk.vkDestroyFence(self.vk_logical_device.device, command.render_fence, null);
+        vk.vkDestroySemaphore(self.vk_logical_device.device, command.render_semaphore, null);
+        vk.vkDestroySemaphore(self.vk_logical_device.device, command.swap_chain_semaphore, null);
         vk.vkDestroyCommandPool(self.vk_logical_device.device, command.pool, null);
     }
 
@@ -598,5 +604,15 @@ pub fn create_commands(self: *Self) !void {
             .commandBufferCount = 1,
         };
         try vk.check_result(vk.vkAllocateCommandBuffers(self.vk_logical_device.device, &allocate_info, commands.buffer));
+        const fence_create_info = vk.VkFenceCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+            .flags = vk.VK_FENCE_CREATE_SIGNALED_BIT,
+        };
+        try vk.check_result(vk.vkCreateFence(self.vk_logical_device.device, &fence_create_info, null, &commands.render_fence));
+        const semaphore_creaet_info = vk.VkSemaphoreCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
+        };
+        try vk.check_result(vk.vkCreateSemaphore(self.vk_logical_device.device, &semaphore_creaet_info, null, &commands.render_semaphore));
+        try vk.check_result(vk.vkCreateSemaphore(self.vk_logical_device.device, &semaphore_creaet_info, null, &commands.swap_chain_semaphore));
     }
 }
