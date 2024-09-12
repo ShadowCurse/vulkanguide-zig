@@ -45,6 +45,7 @@ const Commands = struct {
 };
 
 const FRAMES = 2;
+const TIMEOUT = std.math.maxInt(u64);
 current_frame: u32 = 0,
 
 allocator: Allocator,
@@ -103,6 +104,7 @@ pub fn init(allocator: Allocator) !Self {
     try self.select_physical_device();
     try self.create_logical_device();
     try self.create_swap_chain();
+    try self.create_commands();
 
     return self;
 }
@@ -133,7 +135,11 @@ pub fn deinit(self: *Self) void {
     sdl.SDL_DestroyWindow(self.window);
 }
 
-pub fn run(self: *Self) void {
+pub fn current_frame_command(self: *Self) *Commands {
+    return &self.vk_commands[self.current_frame % Self.FRAMES];
+}
+
+pub fn run(self: *Self) !void {
     var stop = false;
     while (!stop) {
         var sdl_event: sdl.SDL_Event = undefined;
@@ -143,8 +149,114 @@ pub fn run(self: *Self) void {
                 break;
             }
         }
+
+        const current_commands = self.current_frame_command();
+
+        // Wait for a GPU
+        try vk.check_result(vk.vkWaitForFences(
+            self.vk_logical_device.device,
+            1,
+            &current_commands.render_fence,
+            vk.VK_TRUE,
+            Self.TIMEOUT,
+        ));
+        try vk.check_result(vk.vkResetFences(self.vk_logical_device.device, 1, &current_commands.render_fence));
+
+        // Get new image
+        var image_index: u32 = 0;
+        try vk.check_result(vk.vkAcquireNextImageKHR(
+            self.vk_logical_device.device,
+            self.vk_swap_chain.swap_chain,
+            Self.TIMEOUT,
+            current_commands.swap_chain_semaphore,
+            null,
+            &image_index,
+        ));
+
+        // Write commands
+        try vk.check_result(vk.vkResetCommandBuffer(current_commands.buffer, 0));
+        const begin_info = vk.VkCommandBufferBeginInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+        };
+        try vk.check_result(vk.vkBeginCommandBuffer(current_commands.buffer, &begin_info));
+        vk.transition_image(
+            current_commands.buffer,
+            self.vk_swap_chain.images[image_index],
+            vk.VK_IMAGE_LAYOUT_UNDEFINED,
+            vk.VK_IMAGE_LAYOUT_GENERAL,
+        );
+        const v = @abs(std.math.sin(@as(f32, @floatFromInt(self.current_frame)) / 120.0));
+        const clear_color = vk.VkClearColorValue{
+            .float32 = .{ v, v, v, 1.0 },
+        };
+        const subresource = vk.VkImageSubresourceRange{
+            .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = vk.VK_REMAINING_MIP_LEVELS,
+            .baseArrayLayer = 0,
+            .layerCount = vk.VK_REMAINING_ARRAY_LAYERS,
+        };
+        vk.vkCmdClearColorImage(
+            current_commands.buffer,
+            self.vk_swap_chain.images[image_index],
+            vk.VK_IMAGE_LAYOUT_GENERAL,
+            &clear_color,
+            1,
+            &subresource,
+        );
+        vk.transition_image(
+            current_commands.buffer,
+            self.vk_swap_chain.images[image_index],
+            vk.VK_IMAGE_LAYOUT_GENERAL,
+            vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        );
+        try vk.check_result(vk.vkEndCommandBuffer(current_commands.buffer));
+
+        // Submit commands
+        const buffer_submit_info = vk.VkCommandBufferSubmitInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+            .commandBuffer = current_commands.buffer,
+            .deviceMask = 0,
+        };
+        const wait_semaphore_info = vk.VkSemaphoreSubmitInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+            .semaphore = current_commands.swap_chain_semaphore,
+            .stageMask = vk.VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR,
+        };
+        const signal_semaphore_info = vk.VkSemaphoreSubmitInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+            .semaphore = current_commands.render_semaphore,
+            .stageMask = vk.VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+        };
+        const submit_info = vk.VkSubmitInfo2{
+            .sType = vk.VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+            .pWaitSemaphoreInfos = &wait_semaphore_info,
+            .waitSemaphoreInfoCount = 1,
+            .pSignalSemaphoreInfos = &signal_semaphore_info,
+            .signalSemaphoreInfoCount = 1,
+            .pCommandBufferInfos = &buffer_submit_info,
+            .commandBufferInfoCount = 1,
+        };
+        try vk.check_result(vk.vkQueueSubmit2(
+            self.vk_logical_device.graphics_queue,
+            1,
+            &submit_info,
+            current_commands.render_fence,
+        ));
+
+        // Present image in the screen
+        const present_info = vk.VkPresentInfoKHR{
+            .sType = vk.VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+            .pSwapchains = &self.vk_swap_chain.swap_chain,
+            .swapchainCount = 1,
+            .pWaitSemaphores = &current_commands.render_semaphore,
+            .waitSemaphoreCount = 1,
+            .pImageIndices = &image_index,
+        };
+        try vk.check_result(vk.vkQueuePresentKHR(self.vk_logical_device.graphics_queue, &present_info));
+        self.current_frame += 1;
     }
-    _ = self;
 }
 
 pub fn create_vk_instance(self: *Self, sdl_extensions: [][*c]const u8) !void {

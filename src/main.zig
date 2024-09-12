@@ -9,5 +9,5 @@ pub fn main() !void {
     var engine = try Engine.init(allocator);
     defer engine.deinit();
 
-    engine.run();
+    try engine.run();
 }
