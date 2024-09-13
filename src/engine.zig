@@ -51,6 +51,7 @@ current_frame: u32 = 0,
 allocator: Allocator,
 window: *sdl.SDL_Window,
 surface: vk.VkSurfaceKHR = undefined,
+vma_allocator: vk.VmaAllocator = undefined,
 vk_instance: vk.VkInstance = undefined,
 vk_debug_messanger: vk.VkDebugUtilsMessengerEXT = undefined,
 vk_physical_device: PhysicalDevice = undefined,
@@ -103,6 +104,15 @@ pub fn init(allocator: Allocator) !Self {
 
     try self.select_physical_device();
     try self.create_logical_device();
+
+    const allocator_info = vk.VmaAllocatorCreateInfo{
+        .instance = self.vk_instance,
+        .physicalDevice = self.vk_physical_device.device,
+        .device = self.vk_logical_device.device,
+        .flags = vk.VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT,
+    };
+    try vk.check_result(vk.vmaCreateAllocator(&allocator_info, &self.vma_allocator));
+
     try self.create_swap_chain();
     try self.create_commands();
 

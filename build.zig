@@ -32,10 +32,12 @@ pub fn build(b: *std.Build) !void {
         exe.addIncludePath(.{ .cwd_relative = path });
     }
 
-    // exe.addIncludePath(.{ .cwd_relative = "thirdparty/SDL2/" });
+    exe.addIncludePath(b.path("thirdparty/vma"));
+    exe.addCSourceFile(.{ .file = b.path("thirdparty/vma/vk_mem_alloc.cpp"), .flags = &.{} });
+
     exe.linkSystemLibrary("SDL2");
     exe.linkSystemLibrary("vulkan");
-    exe.linkLibC();
+    exe.linkLibCpp();
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
