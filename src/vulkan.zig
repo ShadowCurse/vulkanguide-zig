@@ -7,6 +7,14 @@ const vk = @cImport({
 
 pub usingnamespace vk;
 
+pub const AllocatedImage = struct {
+    image: vk.VkImage,
+    view: vk.VkImageView,
+    extent: vk.VkExtent3D,
+    format: vk.VkFormat,
+    allocation: vk.VmaAllocation,
+};
+
 pub fn check_result(result: vk.VkResult) !void {
     switch (result) {
         vk.VK_SUCCESS => return,
@@ -53,4 +61,54 @@ pub fn transition_image(
     };
 
     vk.vkCmdPipelineBarrier2(buffer, &dependency);
+}
+
+pub fn copy_image_to_image(
+    buffer: vk.VkCommandBuffer,
+    src: vk.VkImage,
+    src_size: vk.VkExtent2D,
+    dst: vk.VkImage,
+    dst_size: vk.VkExtent2D,
+) void {
+    const blit_region = vk.VkImageBlit2{
+        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+        .srcOffsets = .{
+            .{}, .{
+                .x = @intCast(src_size.width),
+                .y = @intCast(src_size.height),
+                .z = 1,
+            },
+        },
+        .dstOffsets = .{
+            .{}, .{
+                .x = @intCast(dst_size.width),
+                .y = @intCast(dst_size.height),
+                .z = 1,
+            },
+        },
+        .srcSubresource = .{
+            .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+            .mipLevel = 0,
+        },
+        .dstSubresource = .{
+            .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+            .mipLevel = 0,
+        },
+    };
+
+    const blit_info = vk.VkBlitImageInfo2{
+        .sType = vk.VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
+        .srcImage = src,
+        .srcImageLayout = vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .dstImage = dst,
+        .dstImageLayout = vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .filter = vk.VK_FILTER_LINEAR,
+        .regionCount = 1,
+        .pRegions = &blit_region,
+    };
+    vk.vkCmdBlitImage2(buffer, &blit_info);
 }
