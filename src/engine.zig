@@ -58,8 +58,11 @@ vk_physical_device: PhysicalDevice = undefined,
 vk_logical_device: LogicalDevice = undefined,
 vk_swap_chain: Swapchain = undefined,
 vk_commands: [FRAMES]Commands = undefined,
+vk_descriptor_pool: vk.VkDescriptorPool = undefined,
 
 draw_image: vk.AllocatedImage = undefined,
+draw_image_desc_set: vk.VkDescriptorSet = undefined,
+draw_image_desc_set_layout: vk.VkDescriptorSetLayout = undefined,
 
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
@@ -117,12 +120,16 @@ pub fn init(allocator: Allocator) !Self {
 
     try self.create_swap_chain();
     try self.create_commands();
+    try self.create_descriptors();
 
     return self;
 }
 
 pub fn deinit(self: *Self) void {
     _ = vk.vkDeviceWaitIdle(self.vk_logical_device.device);
+
+    vk.vkDestroyDescriptorSetLayout(self.vk_logical_device.device, self.draw_image_desc_set_layout, null);
+    vk.vkDestroyDescriptorPool(self.vk_logical_device.device, self.vk_descriptor_pool, null);
 
     vk.vkDestroyImageView(self.vk_logical_device.device, self.draw_image.view, null);
     vk.vmaDestroyImage(self.vma_allocator, self.draw_image.image, self.draw_image.allocation);
@@ -827,4 +834,59 @@ pub fn create_commands(self: *Self) !void {
         try vk.check_result(vk.vkCreateSemaphore(self.vk_logical_device.device, &semaphore_creaet_info, null, &commands.render_semaphore));
         try vk.check_result(vk.vkCreateSemaphore(self.vk_logical_device.device, &semaphore_creaet_info, null, &commands.swap_chain_semaphore));
     }
+}
+
+pub fn create_descriptors(self: *Self) !void {
+    const pool_size = vk.VkDescriptorPoolSize{
+        .type = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .descriptorCount = 1,
+    };
+    const pool_info = vk.VkDescriptorPoolCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .maxSets = 10,
+        .pPoolSizes = &pool_size,
+        .poolSizeCount = 1,
+    };
+    try vk.check_result(vk.vkCreateDescriptorPool(self.vk_logical_device.device, &pool_info, null, &self.vk_descriptor_pool));
+
+    const binging_layout = vk.VkDescriptorSetLayoutBinding{
+        .binding = 0,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .stageFlags = vk.VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
+    const layout_create_info = vk.VkDescriptorSetLayoutCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pBindings = &binging_layout,
+        .bindingCount = 1,
+    };
+    try vk.check_result(vk.vkCreateDescriptorSetLayout(
+        self.vk_logical_device.device,
+        &layout_create_info,
+        null,
+        &self.draw_image_desc_set_layout,
+    ));
+
+    const set_alloc_info = vk.VkDescriptorSetAllocateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = self.vk_descriptor_pool,
+        .pSetLayouts = &self.draw_image_desc_set_layout,
+        .descriptorSetCount = 1,
+    };
+    try vk.check_result(vk.vkAllocateDescriptorSets(self.vk_logical_device.device, &set_alloc_info, &self.draw_image_desc_set));
+
+    const desc_image_info = vk.VkDescriptorImageInfo{
+        .imageLayout = vk.VK_IMAGE_LAYOUT_GENERAL,
+        .imageView = self.draw_image.view,
+    };
+    const desc_image_write = vk.VkWriteDescriptorSet{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstBinding = 0,
+        .dstSet = self.draw_image_desc_set,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &desc_image_info,
+    };
+    vk.vkUpdateDescriptorSets(self.vk_logical_device.device, 1, &desc_image_write, 0, null);
 }
