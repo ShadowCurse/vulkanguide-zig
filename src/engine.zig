@@ -64,6 +64,9 @@ draw_image: vk.AllocatedImage = undefined,
 draw_image_desc_set: vk.VkDescriptorSet = undefined,
 draw_image_desc_set_layout: vk.VkDescriptorSetLayout = undefined,
 
+gradient_pipeline: vk.VkPipeline = undefined,
+gradient_pipeline_layout: vk.VkPipelineLayout = undefined,
+
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
         return error.SDLInit;
@@ -121,12 +124,16 @@ pub fn init(allocator: Allocator) !Self {
     try self.create_swap_chain();
     try self.create_commands();
     try self.create_descriptors();
+    try self.create_pipeline();
 
     return self;
 }
 
 pub fn deinit(self: *Self) void {
     _ = vk.vkDeviceWaitIdle(self.vk_logical_device.device);
+
+    vk.vkDestroyPipelineLayout(self.vk_logical_device.device, self.gradient_pipeline_layout, null);
+    vk.vkDestroyPipeline(self.vk_logical_device.device, self.gradient_pipeline, null);
 
     vk.vkDestroyDescriptorSetLayout(self.vk_logical_device.device, self.draw_image_desc_set_layout, null);
     vk.vkDestroyDescriptorPool(self.vk_logical_device.device, self.vk_descriptor_pool, null);
@@ -292,25 +299,22 @@ pub fn run(self: *Self) !void {
 }
 
 pub fn draw_background(self: *Self, buffer: vk.VkCommandBuffer) void {
-    const v = @abs(std.math.sin(@as(f32, @floatFromInt(self.current_frame)) / 120.0));
-    const clear_color = vk.VkClearColorValue{
-        .float32 = .{ v, v, v, 1.0 },
-    };
-    const subresource = vk.VkImageSubresourceRange{
-        .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
-        .baseMipLevel = 0,
-        .levelCount = vk.VK_REMAINING_MIP_LEVELS,
-        .baseArrayLayer = 0,
-        .layerCount = vk.VK_REMAINING_ARRAY_LAYERS,
-    };
-    vk.vkCmdClearColorImage(
+    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.gradient_pipeline);
+    vk.vkCmdBindDescriptorSets(
         buffer,
-        // self.vk_swap_chain.images[image_index],
-        self.draw_image.image,
-        vk.VK_IMAGE_LAYOUT_GENERAL,
-        &clear_color,
+        vk.VK_PIPELINE_BIND_POINT_COMPUTE,
+        self.gradient_pipeline_layout,
+        0,
         1,
-        &subresource,
+        &self.draw_image_desc_set,
+        0,
+        null,
+    );
+    vk.vkCmdDispatch(
+        buffer,
+        @as(u32, @intFromFloat(@ceil(@as(f32, @floatFromInt(self.vk_swap_chain.extent.width)) / 16.0))),
+        @as(u32, @intFromFloat(@ceil(@as(f32, @floatFromInt(self.vk_swap_chain.extent.height)) / 16.0))),
+        1,
     );
 }
 
@@ -889,4 +893,53 @@ pub fn create_descriptors(self: *Self) !void {
         .pImageInfo = &desc_image_info,
     };
     vk.vkUpdateDescriptorSets(self.vk_logical_device.device, 1, &desc_image_write, 0, null);
+}
+
+pub fn load_shader_module(self: *Self, path: []const u8) !vk.VkShaderModule {
+    const file = try std.fs.cwd().openFile(path, .{});
+    const content = try file.reader().readAllAlloc(self.allocator, std.math.maxInt(usize));
+    defer self.allocator.free(content);
+
+    const create_info = vk.VkShaderModuleCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pCode = @alignCast(@ptrCast(content.ptr)),
+        .codeSize = content.len,
+    };
+
+    var module: vk.VkShaderModule = undefined;
+    try vk.check_result(vk.vkCreateShaderModule(self.vk_logical_device.device, &create_info, null, &module));
+    return module;
+}
+
+pub fn create_pipeline(self: *Self) !void {
+    const compute_layout_create_info = vk.VkPipelineLayoutCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pSetLayouts = &self.draw_image_desc_set_layout,
+        .setLayoutCount = 1,
+    };
+    try vk.check_result(vk.vkCreatePipelineLayout(self.vk_logical_device.device, &compute_layout_create_info, null, &self.gradient_pipeline_layout));
+
+    const compute_shader_module = try self.load_shader_module("gradient.spv");
+    const shader_stage_create_info = vk.VkPipelineShaderStageCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .stage = vk.VK_SHADER_STAGE_COMPUTE_BIT,
+        .module = compute_shader_module,
+        .pName = "main",
+    };
+    const compute_pipeline_create_info = vk.VkComputePipelineCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+        .layout = self.gradient_pipeline_layout,
+        .stage = shader_stage_create_info,
+    };
+
+    try vk.check_result(vk.vkCreateComputePipelines(
+        self.vk_logical_device.device,
+        null,
+        1,
+        &compute_pipeline_create_info,
+        null,
+        &self.gradient_pipeline,
+    ));
+
+    vk.vkDestroyShaderModule(self.vk_logical_device.device, compute_shader_module, null);
 }
