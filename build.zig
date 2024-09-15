@@ -15,6 +15,37 @@ pub fn build(b: *std.Build) !void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    var env_map = try std.process.getEnvMap(b.allocator);
+    defer env_map.deinit();
+
+    const cimgui = b.addStaticLibrary(.{
+        .name = "cimgui",
+        .target = target,
+        .optimize = optimize,
+    });
+    cimgui.addCSourceFiles(.{
+        .files = &.{
+            "thirdparty/cimgui/cimgui.cpp",
+            "thirdparty/cimgui/imgui/imgui.cpp",
+            "thirdparty/cimgui/imgui/imgui_demo.cpp",
+            "thirdparty/cimgui/imgui/imgui_draw.cpp",
+            "thirdparty/cimgui/imgui/imgui_tables.cpp",
+            "thirdparty/cimgui/imgui/imgui_widgets.cpp",
+            "thirdparty/cimgui/imgui/backends/imgui_impl_sdl2.cpp",
+            "thirdparty/cimgui/imgui/backends/imgui_impl_vulkan.cpp",
+        },
+        .flags = &.{},
+    });
+    cimgui.addIncludePath(b.path("thirdparty/cimgui"));
+    cimgui.addIncludePath(b.path("thirdparty/cimgui/imgui"));
+    cimgui.addIncludePath(b.path("thirdparty/cimgui/imgui/backends"));
+    cimgui.addIncludePath(.{ .cwd_relative = env_map.get("X11_INCLUDE_PATH").? });
+    cimgui.addIncludePath(.{ .cwd_relative = env_map.get("XORGPROTO_INCLUDE_PATH").? });
+    const cimgui_sdl2_path = try std.fs.path.join(b.allocator, &.{ env_map.get("SDL2_INCLUDE_PATH").?, "SDL2" });
+    cimgui.addIncludePath(.{ .cwd_relative = cimgui_sdl2_path });
+    cimgui.addIncludePath(.{ .cwd_relative = env_map.get("VULKAN_INCLUDE_PATH").? });
+    cimgui.linkLibCpp();
+
     const exe = b.addExecutable(.{
         .name = "vulkanguide-zig",
         .root_source_file = b.path("src/main.zig"),
@@ -22,21 +53,19 @@ pub fn build(b: *std.Build) !void {
         .optimize = optimize,
     });
 
-    var env_map = try std.process.getEnvMap(b.allocator);
-    defer env_map.deinit();
-
-    if (env_map.get("SDL2_INCLUDE_PATH")) |path| {
-        exe.addIncludePath(.{ .cwd_relative = path });
-    }
-    if (env_map.get("VULKAN_INCLUDE_PATH")) |path| {
-        exe.addIncludePath(.{ .cwd_relative = path });
-    }
+    exe.addIncludePath(b.path("thirdparty/cimgui"));
+    exe.addIncludePath(b.path("thirdparty/cimgui/imgui"));
+    exe.addIncludePath(b.path("thirdparty/cimgui/imgui/backends"));
+    exe.addIncludePath(b.path("thirdparty/cimgui_generated"));
+    exe.addIncludePath(.{ .cwd_relative = env_map.get("SDL2_INCLUDE_PATH").? });
+    exe.addIncludePath(.{ .cwd_relative = env_map.get("VULKAN_INCLUDE_PATH").? });
 
     exe.addIncludePath(b.path("thirdparty/vma"));
     exe.addCSourceFile(.{ .file = b.path("thirdparty/vma/vk_mem_alloc.cpp"), .flags = &.{} });
 
     exe.linkSystemLibrary("SDL2");
     exe.linkSystemLibrary("vulkan");
+    exe.linkLibrary(cimgui);
     exe.linkLibCpp();
 
     // This declares intent for the executable to be installed into the

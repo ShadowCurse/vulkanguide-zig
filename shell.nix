@@ -1,9 +1,11 @@
 { pkgs ? import <nixpkgs> { } }:
 pkgs.mkShell {
-  LD_LIBRARY_PATH = "$LD_LIBRARY_PATH:${pkgs.lib.makeLibraryPath [
-      pkgs.SDL2
-      pkgs.vulkan-loader
-      pkgs.vulkan-validation-layers
+  X11_INCLUDE_PATH = "${pkgs.lib.makeIncludePath [
+    pkgs.xorg.libX11
+  ]}";
+  # needed for X.h file
+  XORGPROTO_INCLUDE_PATH = "${pkgs.lib.makeIncludePath [
+    pkgs.xorg.xorgproto
   ]}";
   SDL2_INCLUDE_PATH = "${pkgs.lib.makeIncludePath [pkgs.SDL2]}";
   VULKAN_INCLUDE_PATH = "${pkgs.lib.makeIncludePath [pkgs.vulkan-headers]}";
