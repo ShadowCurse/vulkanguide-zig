@@ -1,6 +1,7 @@
 const std = @import("std");
 const sdl = @import("sdl.zig");
 const vk = @import("vulkan.zig");
+const cimgui = @import("cimgui.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -67,6 +68,12 @@ draw_image_desc_set_layout: vk.VkDescriptorSetLayout = undefined,
 gradient_pipeline: vk.VkPipeline = undefined,
 gradient_pipeline_layout: vk.VkPipelineLayout = undefined,
 
+immediate_fence: vk.VkFence = undefined,
+immediate_command_pool: vk.VkCommandPool = undefined,
+immediate_command_buffer: vk.VkCommandBuffer = undefined,
+
+imgui_pool: vk.VkDescriptorPool = undefined,
+
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
         return error.SDLInit;
@@ -125,12 +132,21 @@ pub fn init(allocator: Allocator) !Self {
     try self.create_commands();
     try self.create_descriptors();
     try self.create_pipeline();
+    try self.create_immediate_objects();
+    try self.init_imgui();
 
     return self;
 }
 
 pub fn deinit(self: *Self) void {
     _ = vk.vkDeviceWaitIdle(self.vk_logical_device.device);
+
+    cimgui.ImGui_ImplVulkan_DestroyFontsTexture();
+    cimgui.ImGui_ImplVulkan_Shutdown();
+    vk.vkDestroyDescriptorPool(self.vk_logical_device.device, self.imgui_pool, null);
+
+    vk.vkDestroyFence(self.vk_logical_device.device, self.immediate_fence, null);
+    vk.vkDestroyCommandPool(self.vk_logical_device.device, self.immediate_command_pool, null);
 
     vk.vkDestroyPipelineLayout(self.vk_logical_device.device, self.gradient_pipeline_layout, null);
     vk.vkDestroyPipeline(self.vk_logical_device.device, self.gradient_pipeline, null);
@@ -179,7 +195,16 @@ pub fn run(self: *Self) !void {
                 stop = true;
                 break;
             }
+
+            _ = cimgui.ImGui_ImplSDL2_ProcessEvent(@ptrCast(&sdl_event));
         }
+
+        cimgui.ImGui_ImplVulkan_NewFrame();
+        cimgui.ImGui_ImplSDL2_NewFrame();
+        cimgui.igNewFrame();
+        var open = true;
+        cimgui.igShowDemoWindow(&open);
+        cimgui.igRender();
 
         const current_commands = self.current_frame_command();
 
@@ -247,6 +272,31 @@ pub fn run(self: *Self) !void {
             current_commands.buffer,
             self.vk_swap_chain.images[image_index],
             vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        );
+
+        const imgui_attachment = vk.VkRenderingAttachmentInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = self.vk_swap_chain.image_views[image_index],
+            .imageLayout = vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .loadOp = vk.VK_ATTACHMENT_LOAD_OP_LOAD,
+            .storeOp = vk.VK_ATTACHMENT_STORE_OP_STORE,
+        };
+        const imgui_render_info = vk.VkRenderingInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_RENDERING_INFO,
+            .pColorAttachments = &imgui_attachment,
+            .colorAttachmentCount = 1,
+            .renderArea = .{ .extent = self.vk_swap_chain.extent },
+            .layerCount = 1,
+        };
+        vk.vkCmdBeginRendering(current_commands.buffer, &imgui_render_info);
+        cimgui.ImGui_ImplVulkan_RenderDrawData(cimgui.igGetDrawData(), @ptrCast(current_commands.buffer), null);
+        vk.vkCmdEndRendering(current_commands.buffer);
+
+        vk.transition_image(
+            current_commands.buffer,
+            self.vk_swap_chain.images[image_index],
+            vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             vk.VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
         );
 
@@ -942,4 +992,114 @@ pub fn create_pipeline(self: *Self) !void {
     ));
 
     vk.vkDestroyShaderModule(self.vk_logical_device.device, compute_shader_module, null);
+}
+
+pub fn create_immediate_objects(self: *Self) !void {
+    const pool_create_info = vk.VkCommandPoolCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = vk.VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
+        .queueFamilyIndex = self.vk_physical_device.graphics_queue_family,
+    };
+    try vk.check_result(vk.vkCreateCommandPool(self.vk_logical_device.device, &pool_create_info, null, &self.immediate_command_pool));
+
+    const allocate_info = vk.VkCommandBufferAllocateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = self.immediate_command_pool,
+        .level = vk.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = 1,
+    };
+    try vk.check_result(vk.vkAllocateCommandBuffers(self.vk_logical_device.device, &allocate_info, &self.immediate_command_buffer));
+    const fence_create_info = vk.VkFenceCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = vk.VK_FENCE_CREATE_SIGNALED_BIT,
+    };
+    try vk.check_result(vk.vkCreateFence(self.vk_logical_device.device, &fence_create_info, null, &self.immediate_fence));
+}
+
+pub fn immediate_submit(self: *Self, function: *fn (buffer: vk.VkCommandBuffer) void) !void {
+    try vk.check_result(vk.vkResetFences(self.vk_logical_device.device, 1, &self.immediate_fence));
+    try vk.check_result(vk.vkResetCommandBuffer(self.immediate_command_buffer, 0));
+
+    const begin_info = vk.VkCommandBufferBeginInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    try vk.check_result(vk.vkBeginCommandBuffer(self.immediate_command_buffer, &begin_info));
+
+    function(self.immediate_command_buffer);
+
+    try vk.check_result(vk.vkEndCommandBuffer(self.immediate_command_buffer));
+
+    const buffer_submit_info = vk.VkCommandBufferSubmitInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+        .commandBuffer = self.immediate_command_buffer,
+        .deviceMask = 0,
+    };
+    const submit_info = vk.VkSubmitInfo2{
+        .sType = vk.VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+        .pCommandBufferInfos = &buffer_submit_info,
+        .commandBufferInfoCount = 1,
+    };
+    try vk.check_result(vk.vkQueueSubmit2(
+        self.vk_logical_device.graphics_queue,
+        1,
+        &submit_info,
+        self.immediate_fence,
+    ));
+
+    try vk.check_result(vk.vkWaitForFences(
+        self.vk_logical_device.device,
+        1,
+        &self.immediate_fence,
+        true,
+        Self.TIMEOUT,
+    ));
+}
+
+pub fn init_imgui(self: *Self) !void {
+    const pool_sizes = [_]vk.VkDescriptorPoolSize{
+        .{ .type = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1000 },
+        .{ .type = vk.VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1000 },
+        .{ .type = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .descriptorCount = 1000 },
+        .{ .type = vk.VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, .descriptorCount = 1000 },
+        .{ .type = vk.VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, .descriptorCount = 1000 },
+        .{ .type = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1000 },
+        .{ .type = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1000 },
+        .{ .type = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .descriptorCount = 1000 },
+        .{ .type = vk.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, .descriptorCount = 1000 },
+        .{ .type = vk.VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, .descriptorCount = 1000 },
+    };
+
+    const pool_create_info = vk.VkDescriptorPoolCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .flags = vk.VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT,
+        .maxSets = 1000,
+        .pPoolSizes = &pool_sizes,
+        .poolSizeCount = pool_sizes.len,
+    };
+
+    try vk.check_result(vk.vkCreateDescriptorPool(self.vk_logical_device.device, &pool_create_info, null, &self.imgui_pool));
+
+    _ = cimgui.igCreateContext(null);
+    _ = cimgui.ImGui_ImplSDL2_InitForVulkan(@ptrCast(self.window));
+
+    var imgui_init_info = cimgui.ImGui_ImplVulkan_InitInfo{
+        .Instance = @ptrCast(self.vk_instance),
+        .PhysicalDevice = @ptrCast(self.vk_physical_device.device),
+        .Device = @ptrCast(self.vk_logical_device.device),
+        .Queue = @ptrCast(self.vk_logical_device.graphics_queue),
+        .DescriptorPool = @ptrCast(self.imgui_pool),
+        .MinImageCount = 3,
+        .ImageCount = 3,
+        .UseDynamicRendering = true,
+        .PipelineRenderingCreateInfo = .{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
+            .pColorAttachmentFormats = &self.vk_swap_chain.format,
+            .colorAttachmentCount = 1,
+        },
+        .MSAASamples = vk.VK_SAMPLE_COUNT_1_BIT,
+    };
+
+    _ = cimgui.ImGui_ImplVulkan_Init(&imgui_init_info);
+    _ = cimgui.ImGui_ImplVulkan_CreateFontsTexture();
 }

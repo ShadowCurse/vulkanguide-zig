@@ -34,7 +34,6 @@ pub fn build(b: *std.Build) !void {
             "thirdparty/cimgui/imgui/backends/imgui_impl_sdl2.cpp",
             "thirdparty/cimgui/imgui/backends/imgui_impl_vulkan.cpp",
         },
-        .flags = &.{},
     });
     cimgui.addIncludePath(b.path("thirdparty/cimgui"));
     cimgui.addIncludePath(b.path("thirdparty/cimgui/imgui"));
@@ -54,14 +53,12 @@ pub fn build(b: *std.Build) !void {
     });
 
     exe.addIncludePath(b.path("thirdparty/cimgui"));
-    exe.addIncludePath(b.path("thirdparty/cimgui/imgui"));
-    exe.addIncludePath(b.path("thirdparty/cimgui/imgui/backends"));
     exe.addIncludePath(b.path("thirdparty/cimgui_generated"));
     exe.addIncludePath(.{ .cwd_relative = env_map.get("SDL2_INCLUDE_PATH").? });
     exe.addIncludePath(.{ .cwd_relative = env_map.get("VULKAN_INCLUDE_PATH").? });
 
     exe.addIncludePath(b.path("thirdparty/vma"));
-    exe.addCSourceFile(.{ .file = b.path("thirdparty/vma/vk_mem_alloc.cpp"), .flags = &.{} });
+    exe.addCSourceFile(.{ .file = b.path("thirdparty/vma/vk_mem_alloc.cpp") });
 
     exe.linkSystemLibrary("SDL2");
     exe.linkSystemLibrary("vulkan");
