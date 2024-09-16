@@ -13,6 +13,27 @@ const VK_VALIDATION_LAYERS_NAMES = [_][]const u8{"VK_LAYER_KHRONOS_validation"};
 const VK_ADDITIONAL_EXTENSIONS_NAMES = [_][]const u8{"VK_EXT_debug_utils"};
 const VK_PHYSICAL_DEVICE_EXTENSION_NAMES = [_][]const u8{"VK_KHR_swapchain"};
 
+const Vec4 = packed struct {
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+    z: f32 = 0.0,
+    w: f32 = 0.0,
+};
+
+const ComputePushConstants = packed struct {
+    data1: Vec4 = .{},
+    data2: Vec4 = .{},
+    data3: Vec4 = .{},
+    data4: Vec4 = .{},
+};
+
+const ComputeData = struct {
+    name: [:0]const u8,
+    constants: ComputePushConstants,
+    pipeline: vk.VkPipeline,
+    layout: vk.VkPipelineLayout,
+};
+
 const PhysicalDevice = struct {
     device: vk.VkPhysicalDevice,
     graphics_queue_family: u32,
@@ -65,14 +86,17 @@ draw_image: vk.AllocatedImage = undefined,
 draw_image_desc_set: vk.VkDescriptorSet = undefined,
 draw_image_desc_set_layout: vk.VkDescriptorSetLayout = undefined,
 
-gradient_pipeline: vk.VkPipeline = undefined,
-gradient_pipeline_layout: vk.VkPipelineLayout = undefined,
+// gradient_pipeline: vk.VkPipeline = undefined,
+// gradient_pipeline_layout: vk.VkPipelineLayout = undefined,
 
 immediate_fence: vk.VkFence = undefined,
 immediate_command_pool: vk.VkCommandPool = undefined,
 immediate_command_buffer: vk.VkCommandBuffer = undefined,
 
 imgui_pool: vk.VkDescriptorPool = undefined,
+
+selected_compute_data: i32 = 0,
+compute_data: [2]ComputeData = undefined,
 
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
@@ -131,7 +155,7 @@ pub fn init(allocator: Allocator) !Self {
     try self.create_swap_chain();
     try self.create_commands();
     try self.create_descriptors();
-    try self.create_pipeline();
+    try self.create_pipelines();
     try self.create_immediate_objects();
     try self.init_imgui();
 
@@ -148,8 +172,10 @@ pub fn deinit(self: *Self) void {
     vk.vkDestroyFence(self.vk_logical_device.device, self.immediate_fence, null);
     vk.vkDestroyCommandPool(self.vk_logical_device.device, self.immediate_command_pool, null);
 
-    vk.vkDestroyPipelineLayout(self.vk_logical_device.device, self.gradient_pipeline_layout, null);
-    vk.vkDestroyPipeline(self.vk_logical_device.device, self.gradient_pipeline, null);
+    for (self.compute_data) |data| {
+        vk.vkDestroyPipelineLayout(self.vk_logical_device.device, data.layout, null);
+        vk.vkDestroyPipeline(self.vk_logical_device.device, data.pipeline, null);
+    }
 
     vk.vkDestroyDescriptorSetLayout(self.vk_logical_device.device, self.draw_image_desc_set_layout, null);
     vk.vkDestroyDescriptorPool(self.vk_logical_device.device, self.vk_descriptor_pool, null);
@@ -202,8 +228,22 @@ pub fn run(self: *Self) !void {
         cimgui.ImGui_ImplVulkan_NewFrame();
         cimgui.ImGui_ImplSDL2_NewFrame();
         cimgui.igNewFrame();
+
         var open = true;
-        cimgui.igShowDemoWindow(&open);
+        if (cimgui.igBegin("Background parameters", &open, 0)) {
+            const current_compute_data = &self.compute_data[@intCast(self.selected_compute_data)];
+
+            _ = cimgui.igText("Shader name", current_compute_data.name.ptr);
+
+            _ = cimgui.igSliderInt("Shader index", &self.selected_compute_data, 0, self.compute_data.len - 1, null, 0);
+
+            _ = cimgui.igInputFloat4("data1", @ptrCast(&current_compute_data.constants.data1), null, 0);
+            _ = cimgui.igInputFloat4("data2", @ptrCast(&current_compute_data.constants.data2), null, 0);
+            _ = cimgui.igInputFloat4("data3", @ptrCast(&current_compute_data.constants.data3), null, 0);
+            _ = cimgui.igInputFloat4("data4", @ptrCast(&current_compute_data.constants.data4), null, 0);
+        }
+        cimgui.igEnd();
+
         cimgui.igRender();
 
         const current_commands = self.current_frame_command();
@@ -349,16 +389,25 @@ pub fn run(self: *Self) !void {
 }
 
 pub fn draw_background(self: *Self, buffer: vk.VkCommandBuffer) void {
-    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, self.gradient_pipeline);
+    const current_compute_data = &self.compute_data[@intCast(self.selected_compute_data)];
+    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, current_compute_data.pipeline);
     vk.vkCmdBindDescriptorSets(
         buffer,
         vk.VK_PIPELINE_BIND_POINT_COMPUTE,
-        self.gradient_pipeline_layout,
+        current_compute_data.layout,
         0,
         1,
         &self.draw_image_desc_set,
         0,
         null,
+    );
+    vk.vkCmdPushConstants(
+        buffer,
+        current_compute_data.layout,
+        vk.VK_SHADER_STAGE_COMPUTE_BIT,
+        0,
+        @sizeOf(ComputePushConstants),
+        &current_compute_data.constants,
     );
     vk.vkCmdDispatch(
         buffer,
@@ -961,37 +1010,85 @@ pub fn load_shader_module(self: *Self, path: []const u8) !vk.VkShaderModule {
     return module;
 }
 
-pub fn create_pipeline(self: *Self) !void {
+pub fn create_pipelines(self: *Self) !void {
+    const compute_push_constants = vk.VkPushConstantRange{
+        .offset = 0,
+        .size = @sizeOf(ComputePushConstants),
+        .stageFlags = vk.VK_SHADER_STAGE_COMPUTE_BIT,
+    };
+
     const compute_layout_create_info = vk.VkPipelineLayoutCreateInfo{
         .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pSetLayouts = &self.draw_image_desc_set_layout,
         .setLayoutCount = 1,
+        .pPushConstantRanges = &compute_push_constants,
+        .pushConstantRangeCount = 1,
     };
-    try vk.check_result(vk.vkCreatePipelineLayout(self.vk_logical_device.device, &compute_layout_create_info, null, &self.gradient_pipeline_layout));
+    for (&self.compute_data) |*data| {
+        try vk.check_result(vk.vkCreatePipelineLayout(
+            self.vk_logical_device.device,
+            &compute_layout_create_info,
+            null,
+            &data.layout,
+        ));
+    }
 
-    const compute_shader_module = try self.load_shader_module("gradient.spv");
-    const shader_stage_create_info = vk.VkPipelineShaderStageCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .stage = vk.VK_SHADER_STAGE_COMPUTE_BIT,
-        .module = compute_shader_module,
-        .pName = "main",
-    };
-    const compute_pipeline_create_info = vk.VkComputePipelineCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .layout = self.gradient_pipeline_layout,
-        .stage = shader_stage_create_info,
-    };
+    {
+        self.compute_data[0].name = "gradient";
+        self.compute_data[0].constants = .{
+            .data1 = .{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 1.0 },
+            .data2 = .{ .x = 0.0, .y = 0.0, .z = 1.0, .w = 1.0 },
+        };
+        const gradient_shader_module = try self.load_shader_module("gradient.spv");
+        const shader_stage_create_info = vk.VkPipelineShaderStageCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = gradient_shader_module,
+            .pName = "main",
+        };
+        const compute_pipeline_create_info = vk.VkComputePipelineCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .layout = self.compute_data[0].layout,
+            .stage = shader_stage_create_info,
+        };
+        try vk.check_result(vk.vkCreateComputePipelines(
+            self.vk_logical_device.device,
+            null,
+            1,
+            &compute_pipeline_create_info,
+            null,
+            &self.compute_data[0].pipeline,
+        ));
+        vk.vkDestroyShaderModule(self.vk_logical_device.device, gradient_shader_module, null);
+    }
 
-    try vk.check_result(vk.vkCreateComputePipelines(
-        self.vk_logical_device.device,
-        null,
-        1,
-        &compute_pipeline_create_info,
-        null,
-        &self.gradient_pipeline,
-    ));
-
-    vk.vkDestroyShaderModule(self.vk_logical_device.device, compute_shader_module, null);
+    {
+        self.compute_data[1].name = "sky";
+        self.compute_data[1].constants = .{
+            .data1 = .{ .x = 0.1, .y = 0.2, .z = 0.4, .w = 0.999 },
+        };
+        const sky_shader_module = try self.load_shader_module("sky.spv");
+        const shader_stage_create_info = vk.VkPipelineShaderStageCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage = vk.VK_SHADER_STAGE_COMPUTE_BIT,
+            .module = sky_shader_module,
+            .pName = "main",
+        };
+        const compute_pipeline_create_info = vk.VkComputePipelineCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .layout = self.compute_data[1].layout,
+            .stage = shader_stage_create_info,
+        };
+        try vk.check_result(vk.vkCreateComputePipelines(
+            self.vk_logical_device.device,
+            null,
+            1,
+            &compute_pipeline_create_info,
+            null,
+            &self.compute_data[1].pipeline,
+        ));
+        vk.vkDestroyShaderModule(self.vk_logical_device.device, sky_shader_module, null);
+    }
 }
 
 pub fn create_immediate_objects(self: *Self) !void {
