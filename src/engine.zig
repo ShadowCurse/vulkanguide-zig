@@ -95,6 +95,9 @@ imgui_pool: vk.VkDescriptorPool = undefined,
 selected_compute_data: i32 = 0,
 compute_data: [2]ComputeData = undefined,
 
+triangle_pipeline_layout: vk.VkPipelineLayout = undefined,
+triangle_pipeline: vk.VkPipeline = undefined,
+
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
         return error.SDLInit;
@@ -153,6 +156,7 @@ pub fn init(allocator: Allocator) !Self {
     try self.create_commands();
     try self.create_descriptors();
     try self.create_compute_pipelines();
+    try self.create_triangle_pipeline();
     try self.create_immediate_objects();
     try self.init_imgui();
 
@@ -168,6 +172,9 @@ pub fn deinit(self: *Self) void {
 
     vk.vkDestroyFence(self.vk_logical_device.device, self.immediate_fence, null);
     vk.vkDestroyCommandPool(self.vk_logical_device.device, self.immediate_command_pool, null);
+
+    vk.vkDestroyPipelineLayout(self.vk_logical_device.device, self.triangle_pipeline_layout, null);
+    vk.vkDestroyPipeline(self.vk_logical_device.device, self.triangle_pipeline, null);
 
     for (self.compute_data) |data| {
         vk.vkDestroyPipelineLayout(self.vk_logical_device.device, data.layout, null);
@@ -287,6 +294,15 @@ pub fn run(self: *Self) !void {
             current_commands.buffer,
             self.draw_image.image,
             vk.VK_IMAGE_LAYOUT_GENERAL,
+            vk.VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+        );
+
+        self.draw_geometry(current_commands.buffer);
+
+        vk.transition_image(
+            current_commands.buffer,
+            self.draw_image.image,
+            vk.VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
             vk.VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         );
         vk.transition_image(
@@ -385,7 +401,7 @@ pub fn run(self: *Self) !void {
     }
 }
 
-pub fn draw_background(self: *Self, buffer: vk.VkCommandBuffer) void {
+pub fn draw_background(self: *const Self, buffer: vk.VkCommandBuffer) void {
     const current_compute_data = &self.compute_data[@intCast(self.selected_compute_data)];
     vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, current_compute_data.pipeline);
     vk.vkCmdBindDescriptorSets(
@@ -412,6 +428,51 @@ pub fn draw_background(self: *Self, buffer: vk.VkCommandBuffer) void {
         @as(u32, @intFromFloat(@ceil(@as(f32, @floatFromInt(self.vk_swap_chain.extent.height)) / 16.0))),
         1,
     );
+}
+
+pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
+    const color_attachment = vk.VkRenderingAttachmentInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = self.draw_image.view,
+        .imageLayout = vk.VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp = vk.VK_ATTACHMENT_LOAD_OP_LOAD,
+        .storeOp = vk.VK_ATTACHMENT_STORE_OP_STORE,
+    };
+
+    const render_info = vk.VkRenderingInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .pColorAttachments = &color_attachment,
+        .colorAttachmentCount = 1,
+        .renderArea = .{ .extent = .{
+            .width = self.draw_image.extent.width,
+            .height = self.draw_image.extent.height,
+        } },
+        .layerCount = 1,
+    };
+    vk.vkCmdBeginRendering(buffer, &render_info);
+
+    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.triangle_pipeline);
+    const viewport = vk.VkViewport{
+        .x = 0.0,
+        .y = 0.0,
+        .width = @floatFromInt(self.draw_image.extent.width),
+        .height = @floatFromInt(self.draw_image.extent.height),
+        .minDepth = 0.0,
+        .maxDepth = 1.0,
+    };
+    vk.vkCmdSetViewport(buffer, 0, 1, &viewport);
+    const scissor = vk.VkRect2D{ .offset = .{
+        .x = 0.0,
+        .y = 0.0,
+    }, .extent = .{
+        .width = self.draw_image.extent.width,
+        .height = self.draw_image.extent.height,
+    } };
+    vk.vkCmdSetScissor(buffer, 0, 1, &scissor);
+
+    vk.vkCmdDraw(buffer, 3, 1, 0, 0);
+
+    vk.vkCmdEndRendering(buffer);
 }
 
 pub fn create_vk_instance(self: *Self, sdl_extensions: [][*c]const u8) !void {
@@ -1036,7 +1097,10 @@ pub fn create_compute_pipelines(self: *Self) !void {
             .data1 = .{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 1.0 },
             .data2 = .{ .x = 0.0, .y = 0.0, .z = 1.0, .w = 1.0 },
         };
+
         const gradient_shader_module = try self.load_shader_module("gradient.spv");
+        defer vk.vkDestroyShaderModule(self.vk_logical_device.device, gradient_shader_module, null);
+
         const shader_stage_create_info = vk.VkPipelineShaderStageCreateInfo{
             .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage = vk.VK_SHADER_STAGE_COMPUTE_BIT,
@@ -1056,7 +1120,6 @@ pub fn create_compute_pipelines(self: *Self) !void {
             null,
             &self.compute_data[0].pipeline,
         ));
-        vk.vkDestroyShaderModule(self.vk_logical_device.device, gradient_shader_module, null);
     }
 
     {
@@ -1064,7 +1127,10 @@ pub fn create_compute_pipelines(self: *Self) !void {
         self.compute_data[1].constants = .{
             .data1 = .{ .x = 0.1, .y = 0.2, .z = 0.4, .w = 0.999 },
         };
+
         const sky_shader_module = try self.load_shader_module("sky.spv");
+        defer vk.vkDestroyShaderModule(self.vk_logical_device.device, sky_shader_module, null);
+
         const shader_stage_create_info = vk.VkPipelineShaderStageCreateInfo{
             .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             .stage = vk.VK_SHADER_STAGE_COMPUTE_BIT,
@@ -1084,7 +1150,6 @@ pub fn create_compute_pipelines(self: *Self) !void {
             null,
             &self.compute_data[1].pipeline,
         ));
-        vk.vkDestroyShaderModule(self.vk_logical_device.device, sky_shader_module, null);
     }
 }
 
@@ -1196,4 +1261,35 @@ pub fn init_imgui(self: *Self) !void {
 
     _ = cimgui.ImGui_ImplVulkan_Init(&imgui_init_info);
     _ = cimgui.ImGui_ImplVulkan_CreateFontsTexture();
+}
+
+pub fn create_triangle_pipeline(self: *Self) !void {
+    const vertex_shader_module = try self.load_shader_module("triangle_vert.spv");
+    defer vk.vkDestroyShaderModule(self.vk_logical_device.device, vertex_shader_module, null);
+    const fragment_shader_module = try self.load_shader_module("triangle_frag.spv");
+    defer vk.vkDestroyShaderModule(self.vk_logical_device.device, fragment_shader_module, null);
+
+    const layout_create_info = vk.VkPipelineLayoutCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+    };
+    try vk.check_result(vk.vkCreatePipelineLayout(
+        self.vk_logical_device.device,
+        &layout_create_info,
+        null,
+        &self.triangle_pipeline_layout,
+    ));
+
+    var builder: vk.PipelineBuilder = .{};
+    self.triangle_pipeline = try builder
+        .layout(self.triangle_pipeline_layout)
+        .shaders(vertex_shader_module, fragment_shader_module)
+        .input_topology(vk.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .polygon_mode(vk.VK_POLYGON_MODE_FILL)
+        .cull_mode(vk.VK_CULL_MODE_NONE, vk.VK_FRONT_FACE_CLOCKWISE)
+        .multisampling_none()
+        .blending_none()
+        .color_attachment_format(self.draw_image.format)
+        .depthtest_none()
+        .depth_format(vk.VK_FORMAT_UNDEFINED)
+        .build(self.vk_logical_device.device);
 }
