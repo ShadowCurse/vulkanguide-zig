@@ -86,9 +86,6 @@ draw_image: vk.AllocatedImage = undefined,
 draw_image_desc_set: vk.VkDescriptorSet = undefined,
 draw_image_desc_set_layout: vk.VkDescriptorSetLayout = undefined,
 
-// gradient_pipeline: vk.VkPipeline = undefined,
-// gradient_pipeline_layout: vk.VkPipelineLayout = undefined,
-
 immediate_fence: vk.VkFence = undefined,
 immediate_command_pool: vk.VkCommandPool = undefined,
 immediate_command_buffer: vk.VkCommandBuffer = undefined,
@@ -155,7 +152,7 @@ pub fn init(allocator: Allocator) !Self {
     try self.create_swap_chain();
     try self.create_commands();
     try self.create_descriptors();
-    try self.create_pipelines();
+    try self.create_compute_pipelines();
     try self.create_immediate_objects();
     try self.init_imgui();
 
@@ -1010,7 +1007,7 @@ pub fn load_shader_module(self: *Self, path: []const u8) !vk.VkShaderModule {
     return module;
 }
 
-pub fn create_pipelines(self: *Self) !void {
+pub fn create_compute_pipelines(self: *Self) !void {
     const compute_push_constants = vk.VkPushConstantRange{
         .offset = 0,
         .size = @sizeOf(ComputePushConstants),
