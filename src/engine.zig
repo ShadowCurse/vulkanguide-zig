@@ -13,11 +13,50 @@ const VK_VALIDATION_LAYERS_NAMES = [_][]const u8{"VK_LAYER_KHRONOS_validation"};
 const VK_ADDITIONAL_EXTENSIONS_NAMES = [_][]const u8{"VK_EXT_debug_utils"};
 const VK_PHYSICAL_DEVICE_EXTENSION_NAMES = [_][]const u8{"VK_KHR_swapchain"};
 
+const Vec3 = packed struct {
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+    z: f32 = 0.0,
+};
+
 const Vec4 = packed struct {
     x: f32 = 0.0,
     y: f32 = 0.0,
     z: f32 = 0.0,
     w: f32 = 0.0,
+};
+
+const Mat4 = packed struct {
+    i: Vec4,
+    j: Vec4,
+    k: Vec4,
+    t: Vec4,
+
+    const IDENDITY = Mat4{
+        .i = Vec4{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 0.0 },
+        .j = Vec4{ .x = 0.0, .y = 1.0, .z = 0.0, .w = 0.0 },
+        .k = Vec4{ .x = 0.0, .y = 0.0, .z = 1.0, .w = 0.0 },
+        .t = Vec4{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 1.0 },
+    };
+};
+
+const Vertex = packed struct {
+    position: Vec3 = .{ .x = 0.0, .y = 0.0, .z = 0.0 },
+    uv_x: f32 = 0.0,
+    normal: Vec3 = .{ .x = 0.0, .y = 0.0, .z = 0.0 },
+    uv_y: f32 = 0.0,
+    color: Vec4 = .{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 0.0 },
+};
+
+const GpuMesh = struct {
+    index_buffer: vk.AllocatedBuffer,
+    vertex_buffer: vk.AllocatedBuffer,
+    vertex_device_address: vk.VkDeviceAddress,
+};
+
+const GpuPushConstants = struct {
+    world_matrix: Mat4,
+    device_address: vk.VkDeviceAddress,
 };
 
 const ComputePushConstants = packed struct {
@@ -98,6 +137,10 @@ compute_data: [2]ComputeData = undefined,
 triangle_pipeline_layout: vk.VkPipelineLayout = undefined,
 triangle_pipeline: vk.VkPipeline = undefined,
 
+mesh_pipeline_layout: vk.VkPipelineLayout = undefined,
+mesh_pipeline: vk.VkPipeline = undefined,
+rectangle: GpuMesh = undefined,
+
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
         return error.SDLInit;
@@ -155,9 +198,15 @@ pub fn init(allocator: Allocator) !Self {
     try self.create_swap_chain();
     try self.create_commands();
     try self.create_descriptors();
+
+    try self.create_immediate_objects();
+
     try self.create_compute_pipelines();
     try self.create_triangle_pipeline();
-    try self.create_immediate_objects();
+
+    try self.create_mesh_pipeline();
+    try self.init_default_mesh();
+
     try self.init_imgui();
 
     return self;
@@ -172,6 +221,11 @@ pub fn deinit(self: *Self) void {
 
     vk.vkDestroyFence(self.vk_logical_device.device, self.immediate_fence, null);
     vk.vkDestroyCommandPool(self.vk_logical_device.device, self.immediate_command_pool, null);
+
+    self.destroy_buffer(&self.rectangle.index_buffer);
+    self.destroy_buffer(&self.rectangle.vertex_buffer);
+    vk.vkDestroyPipelineLayout(self.vk_logical_device.device, self.mesh_pipeline_layout, null);
+    vk.vkDestroyPipeline(self.vk_logical_device.device, self.mesh_pipeline, null);
 
     vk.vkDestroyPipelineLayout(self.vk_logical_device.device, self.triangle_pipeline_layout, null);
     vk.vkDestroyPipeline(self.vk_logical_device.device, self.triangle_pipeline, null);
@@ -469,8 +523,23 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
         .height = self.draw_image.extent.height,
     } };
     vk.vkCmdSetScissor(buffer, 0, 1, &scissor);
-
     vk.vkCmdDraw(buffer, 3, 1, 0, 0);
+
+    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.mesh_pipeline);
+    const gpu_push_constatns = GpuPushConstants{
+        .world_matrix = Mat4.IDENDITY,
+        .device_address = self.rectangle.vertex_device_address,
+    };
+    vk.vkCmdPushConstants(
+        buffer,
+        self.mesh_pipeline_layout,
+        vk.VK_SHADER_STAGE_VERTEX_BIT,
+        0,
+        @sizeOf(GpuPushConstants),
+        &gpu_push_constatns,
+    );
+    vk.vkCmdBindIndexBuffer(buffer, self.rectangle.index_buffer.buffer, 0, vk.VK_INDEX_TYPE_UINT32);
+    vk.vkCmdDrawIndexed(buffer, 6, 1, 0, 0, 0);
 
     vk.vkCmdEndRendering(buffer);
 }
@@ -1175,7 +1244,7 @@ pub fn create_immediate_objects(self: *Self) !void {
     try vk.check_result(vk.vkCreateFence(self.vk_logical_device.device, &fence_create_info, null, &self.immediate_fence));
 }
 
-pub fn immediate_submit(self: *Self, function: *fn (buffer: vk.VkCommandBuffer) void) !void {
+pub fn immediate_submit_begin(self: *const Self) !void {
     try vk.check_result(vk.vkResetFences(self.vk_logical_device.device, 1, &self.immediate_fence));
     try vk.check_result(vk.vkResetCommandBuffer(self.immediate_command_buffer, 0));
 
@@ -1184,9 +1253,9 @@ pub fn immediate_submit(self: *Self, function: *fn (buffer: vk.VkCommandBuffer) 
         .flags = vk.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
     };
     try vk.check_result(vk.vkBeginCommandBuffer(self.immediate_command_buffer, &begin_info));
+}
 
-    function(self.immediate_command_buffer);
-
+pub fn immediate_submit_end(self: *const Self) !void {
     try vk.check_result(vk.vkEndCommandBuffer(self.immediate_command_buffer));
 
     const buffer_submit_info = vk.VkCommandBufferSubmitInfo{
@@ -1210,7 +1279,7 @@ pub fn immediate_submit(self: *Self, function: *fn (buffer: vk.VkCommandBuffer) 
         self.vk_logical_device.device,
         1,
         &self.immediate_fence,
-        true,
+        vk.VK_TRUE,
         Self.TIMEOUT,
     ));
 }
@@ -1292,4 +1361,157 @@ pub fn create_triangle_pipeline(self: *Self) !void {
         .depthtest_none()
         .depth_format(vk.VK_FORMAT_UNDEFINED)
         .build(self.vk_logical_device.device);
+}
+
+pub fn create_mesh_pipeline(self: *Self) !void {
+    const vertex_shader_module = try self.load_shader_module("mesh_vert.spv");
+    defer vk.vkDestroyShaderModule(self.vk_logical_device.device, vertex_shader_module, null);
+    const fragment_shader_module = try self.load_shader_module("triangle_frag.spv");
+    defer vk.vkDestroyShaderModule(self.vk_logical_device.device, fragment_shader_module, null);
+
+    const push_constant_range = vk.VkPushConstantRange{
+        .size = @sizeOf(GpuPushConstants),
+        .offset = 0,
+        .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT,
+    };
+
+    const layout_create_info = vk.VkPipelineLayoutCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+        .pPushConstantRanges = &push_constant_range,
+        .pushConstantRangeCount = 1,
+    };
+    try vk.check_result(vk.vkCreatePipelineLayout(
+        self.vk_logical_device.device,
+        &layout_create_info,
+        null,
+        &self.mesh_pipeline_layout,
+    ));
+
+    var builder: vk.PipelineBuilder = .{};
+    self.mesh_pipeline = try builder
+        .layout(self.mesh_pipeline_layout)
+        .shaders(vertex_shader_module, fragment_shader_module)
+        .input_topology(vk.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
+        .polygon_mode(vk.VK_POLYGON_MODE_FILL)
+        .cull_mode(vk.VK_CULL_MODE_NONE, vk.VK_FRONT_FACE_CLOCKWISE)
+        .multisampling_none()
+        .blending_none()
+        .color_attachment_format(self.draw_image.format)
+        .depthtest_none()
+        .depth_format(vk.VK_FORMAT_UNDEFINED)
+        .build(self.vk_logical_device.device);
+}
+
+pub fn create_buffer(self: *const Self, size: usize, usage: vk.VkBufferUsageFlags, memory_usage: vk.VmaMemoryUsage) !vk.AllocatedBuffer {
+    const buffer_info = vk.VkBufferCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = size,
+        .usage = usage,
+    };
+    const alloc_info = vk.VmaAllocationCreateInfo{
+        .usage = memory_usage,
+        .flags = vk.VMA_ALLOCATION_CREATE_MAPPED_BIT,
+    };
+    var new_buffer: vk.AllocatedBuffer = undefined;
+    try vk.check_result(vk.vmaCreateBuffer(
+        self.vma_allocator,
+        &buffer_info,
+        &alloc_info,
+        &new_buffer.buffer,
+        &new_buffer.allocation,
+        &new_buffer.allocation_info,
+    ));
+    return new_buffer;
+}
+
+pub fn destroy_buffer(self: *const Self, buffer: *const vk.AllocatedBuffer) void {
+    vk.vmaDestroyBuffer(self.vma_allocator, buffer.buffer, buffer.allocation);
+}
+
+pub fn create_gpu_mesh(self: *const Self, indices: []const u32, vertices: []const Vertex) !GpuMesh {
+    const index_buffer_size = indices.len * @sizeOf(u32);
+    const vertex_buffer_size = vertices.len * @sizeOf(Vertex);
+
+    var new_mesh: GpuMesh = undefined;
+    new_mesh.index_buffer = try self.create_buffer(
+        index_buffer_size,
+        vk.VK_BUFFER_USAGE_INDEX_BUFFER_BIT | vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        vk.VMA_MEMORY_USAGE_GPU_ONLY,
+    );
+    new_mesh.vertex_buffer = try self.create_buffer(
+        vertex_buffer_size,
+        vk.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | vk.VK_BUFFER_USAGE_TRANSFER_DST_BIT | vk.VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        vk.VMA_MEMORY_USAGE_GPU_ONLY,
+    );
+    const device_address_info = vk.VkBufferDeviceAddressInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+        .buffer = new_mesh.vertex_buffer.buffer,
+    };
+    new_mesh.vertex_device_address = vk.vkGetBufferDeviceAddress(self.vk_logical_device.device, &device_address_info);
+
+    const staging_buffer = try self.create_buffer(
+        index_buffer_size + vertex_buffer_size,
+        vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        vk.VMA_MEMORY_USAGE_CPU_ONLY,
+    );
+    defer self.destroy_buffer(&staging_buffer);
+
+    var vertex_buffer_slice: []Vertex = undefined;
+    vertex_buffer_slice.ptr = @alignCast(@ptrCast(staging_buffer.allocation_info.pMappedData));
+    vertex_buffer_slice.len = vertices.len;
+    @memcpy(vertex_buffer_slice, vertices);
+
+    var index_buffer_slice: []u32 = undefined;
+    index_buffer_slice.ptr = @alignCast(@as([*]u32, @ptrFromInt(
+        @as(usize, @intFromPtr(
+            staging_buffer.allocation_info.pMappedData,
+        )) + vertex_buffer_size,
+    )));
+    index_buffer_slice.len = indices.len;
+    @memcpy(index_buffer_slice, indices);
+
+    {
+        try self.immediate_submit_begin();
+
+        const vertex_copy = vk.VkBufferCopy{
+            .dstOffset = 0,
+            .srcOffset = 0,
+            .size = vertex_buffer_size,
+        };
+        vk.vkCmdCopyBuffer(self.immediate_command_buffer, staging_buffer.buffer, new_mesh.vertex_buffer.buffer, 1, &vertex_copy);
+
+        const index_copy = vk.VkBufferCopy{
+            .dstOffset = 0,
+            .srcOffset = vertex_buffer_size,
+            .size = index_buffer_size,
+        };
+        vk.vkCmdCopyBuffer(self.immediate_command_buffer, staging_buffer.buffer, new_mesh.index_buffer.buffer, 1, &index_copy);
+
+        try self.immediate_submit_end();
+    }
+
+    return new_mesh;
+}
+
+pub fn init_default_mesh(self: *Self) !void {
+    const vertices = [_]Vertex{
+        .{
+            .position = .{ .x = 0.5, .y = -0.5, .z = 0.0 },
+            .color = .{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 1.0 },
+        },
+        .{
+            .position = .{ .x = 0.5, .y = 0.5, .z = 0.0 },
+            .color = .{ .x = 0.5, .y = 0.5, .z = 0.5, .w = 1.0 },
+        },
+        .{
+            .position = .{ .x = -0.5, .y = -0.5, .z = 0.0 },
+            .color = .{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 1.0 },
+        },
+        .{
+            .position = .{ .x = -0.5, .y = 0.5, .z = 0.0 },
+            .color = .{ .x = 0.0, .y = 1.0, .z = 0.0, .w = 1.0 },
+        },
+    };
+    const indices = [_]u32{ 0, 1, 2, 2, 1, 3 };
+    self.rectangle = try self.create_gpu_mesh(&indices, &vertices);
 }

@@ -15,6 +15,12 @@ pub const AllocatedImage = struct {
     allocation: vk.VmaAllocation,
 };
 
+pub const AllocatedBuffer = struct {
+    buffer: vk.VkBuffer,
+    allocation: vk.VmaAllocation,
+    allocation_info: vk.VmaAllocationInfo,
+};
+
 pub fn check_result(result: vk.VkResult) !void {
     switch (result) {
         vk.VK_SUCCESS => return,
