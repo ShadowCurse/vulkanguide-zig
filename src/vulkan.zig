@@ -226,6 +226,19 @@ pub const PipelineBuilder = struct {
         return self;
     }
 
+    pub fn depthtest(self: *Self, depth_write_enable: bool, depth_compare_op: vk.VkCompareOp) *Self {
+        self.depth_stencil.depthTestEnable = vk.VK_TRUE;
+        self.depth_stencil.depthWriteEnable = @intFromBool(depth_write_enable);
+        self.depth_stencil.depthCompareOp = depth_compare_op;
+        self.depth_stencil.depthBoundsTestEnable = vk.VK_FALSE;
+        self.depth_stencil.stencilTestEnable = vk.VK_FALSE;
+        self.depth_stencil.front = .{};
+        self.depth_stencil.back = .{};
+        self.depth_stencil.minDepthBounds = 0.0;
+        self.depth_stencil.maxDepthBounds = 1.0;
+        return self;
+    }
+
     pub fn build(self: *Self, device: vk.VkDevice) !vk.VkPipeline {
         self.rendering.pColorAttachmentFormats = &self._color_attachment_format;
         self.rendering.colorAttachmentCount = 1;

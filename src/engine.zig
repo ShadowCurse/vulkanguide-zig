@@ -113,6 +113,7 @@ vk_commands: [FRAMES]Commands = undefined,
 vk_descriptor_pool: vk.VkDescriptorPool = undefined,
 
 draw_image: vk.AllocatedImage = undefined,
+depth_image: vk.AllocatedImage = undefined,
 draw_image_desc_set: vk.VkDescriptorSet = undefined,
 draw_image_desc_set_layout: vk.VkDescriptorSetLayout = undefined,
 
@@ -245,6 +246,9 @@ pub fn deinit(self: *Self) void {
     vk.vkDestroyDescriptorSetLayout(self.vk_logical_device.device, self.draw_image_desc_set_layout, null);
     vk.vkDestroyDescriptorPool(self.vk_logical_device.device, self.vk_descriptor_pool, null);
 
+    vk.vkDestroyImageView(self.vk_logical_device.device, self.depth_image.view, null);
+    vk.vmaDestroyImage(self.vma_allocator, self.depth_image.image, self.depth_image.allocation);
+
     vk.vkDestroyImageView(self.vk_logical_device.device, self.draw_image.view, null);
     vk.vmaDestroyImage(self.vma_allocator, self.draw_image.image, self.draw_image.allocation);
 
@@ -363,6 +367,13 @@ pub fn run(self: *Self) !void {
             self.draw_image.image,
             vk.VK_IMAGE_LAYOUT_GENERAL,
             vk.VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+        );
+
+        vk.transition_image(
+            current_commands.buffer,
+            self.depth_image.image,
+            vk.VK_IMAGE_LAYOUT_UNDEFINED,
+            vk.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
         );
 
         self.draw_geometry(current_commands.buffer);
@@ -506,11 +517,20 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
         .loadOp = vk.VK_ATTACHMENT_LOAD_OP_LOAD,
         .storeOp = vk.VK_ATTACHMENT_STORE_OP_STORE,
     };
+    const depth_attachment = vk.VkRenderingAttachmentInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView = self.depth_image.view,
+        .imageLayout = vk.VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .loadOp = vk.VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp = vk.VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue = .{ .depthStencil = .{ .depth = 0.0 } },
+    };
 
     const render_info = vk.VkRenderingInfo{
         .sType = vk.VK_STRUCTURE_TYPE_RENDERING_INFO,
         .pColorAttachments = &color_attachment,
         .colorAttachmentCount = 1,
+        .pDepthAttachment = &depth_attachment,
         .renderArea = .{ .extent = .{
             .width = self.draw_image.extent.width,
             .height = self.draw_image.extent.height,
@@ -1030,18 +1050,17 @@ pub fn create_swap_chain(self: *Self) !void {
         );
     }
 
+    // Draw image
     self.draw_image.extent = vk.VkExtent3D{
         .width = self.vk_swap_chain.extent.width,
         .height = self.vk_swap_chain.extent.height,
         .depth = 1,
     };
     self.draw_image.format = vk.VK_FORMAT_R16G16B16A16_SFLOAT;
-
     const image_usage = vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
         vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT |
         vk.VK_IMAGE_USAGE_STORAGE_BIT |
         vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-
     const image_create_info = vk.VkImageCreateInfo{
         .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
         .imageType = vk.VK_IMAGE_TYPE_2D,
@@ -1059,7 +1078,6 @@ pub fn create_swap_chain(self: *Self) !void {
         .usage = vk.VMA_MEMORY_USAGE_GPU_ONLY,
         .requiredFlags = vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
     };
-
     try vk.check_result(vk.vmaCreateImage(
         self.vma_allocator,
         &image_create_info,
@@ -1068,7 +1086,6 @@ pub fn create_swap_chain(self: *Self) !void {
         &self.draw_image.allocation,
         null,
     ));
-
     const image_view_create_info = vk.VkImageViewCreateInfo{
         .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
         .viewType = vk.VK_IMAGE_VIEW_TYPE_2D,
@@ -1082,7 +1099,62 @@ pub fn create_swap_chain(self: *Self) !void {
             .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
         },
     };
-    try vk.check_result(vk.vkCreateImageView(self.vk_logical_device.device, &image_view_create_info, null, &self.draw_image.view));
+    try vk.check_result(vk.vkCreateImageView(
+        self.vk_logical_device.device,
+        &image_view_create_info,
+        null,
+        &self.draw_image.view,
+    ));
+
+    // Depth image
+    self.depth_image.format = vk.VK_FORMAT_D32_SFLOAT;
+    self.depth_image.extent = self.draw_image.extent;
+    const depth_image_usage = vk.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    const depth_image_create_info = vk.VkImageCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = vk.VK_IMAGE_TYPE_2D,
+        .format = self.depth_image.format,
+        .extent = self.depth_image.extent,
+        .usage = depth_image_usage,
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        //for MSAA. we will not be using it by default, so default it to 1 sample per pixel.
+        .samples = vk.VK_SAMPLE_COUNT_1_BIT,
+        //optimal tiling, which means the image is stored on the best gpu format
+        .tiling = vk.VK_IMAGE_TILING_OPTIMAL,
+    };
+    const depth_alloc_info = vk.VmaAllocationCreateInfo{
+        .usage = vk.VMA_MEMORY_USAGE_GPU_ONLY,
+        .requiredFlags = vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    };
+    try vk.check_result(vk.vmaCreateImage(
+        self.vma_allocator,
+        &depth_image_create_info,
+        &depth_alloc_info,
+        &self.depth_image.image,
+        &self.depth_image.allocation,
+        null,
+    ));
+
+    const depth_image_view_create_info = vk.VkImageViewCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .viewType = vk.VK_IMAGE_VIEW_TYPE_2D,
+        .image = self.depth_image.image,
+        .format = self.depth_image.format,
+        .subresourceRange = .{
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+            .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
+        },
+    };
+    try vk.check_result(vk.vkCreateImageView(
+        self.vk_logical_device.device,
+        &depth_image_view_create_info,
+        null,
+        &self.depth_image.view,
+    ));
 }
 
 pub fn create_commands(self: *Self) !void {
@@ -1406,7 +1478,7 @@ pub fn create_triangle_pipeline(self: *Self) !void {
         .blending_none()
         .color_attachment_format(self.draw_image.format)
         .depthtest_none()
-        .depth_format(vk.VK_FORMAT_UNDEFINED)
+        .depth_format(vk.VK_FORMAT_D32_SFLOAT)
         .build(self.vk_logical_device.device);
 }
 
@@ -1444,8 +1516,8 @@ pub fn create_mesh_pipeline(self: *Self) !void {
         .multisampling_none()
         .blending_none()
         .color_attachment_format(self.draw_image.format)
-        .depthtest_none()
-        .depth_format(vk.VK_FORMAT_UNDEFINED)
+        .depthtest(true, vk.VK_COMPARE_OP_GREATER_OR_EQUAL)
+        .depth_format(self.depth_image.format)
         .build(self.vk_logical_device.device);
 }
 
