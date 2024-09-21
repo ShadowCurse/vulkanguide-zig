@@ -2,6 +2,7 @@ const std = @import("std");
 const sdl = @import("sdl.zig");
 const vk = @import("vulkan.zig");
 const cimgui = @import("cimgui.zig");
+const cgltf = @import("cgltf.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -13,10 +14,19 @@ const VK_VALIDATION_LAYERS_NAMES = [_][]const u8{"VK_LAYER_KHRONOS_validation"};
 const VK_ADDITIONAL_EXTENSIONS_NAMES = [_][]const u8{"VK_EXT_debug_utils"};
 const VK_PHYSICAL_DEVICE_EXTENSION_NAMES = [_][]const u8{"VK_KHR_swapchain"};
 
+const Vec2 = packed struct {
+    x: f32 = 0.0,
+    y: f32 = 0.0,
+};
+
 const Vec3 = packed struct {
     x: f32 = 0.0,
     y: f32 = 0.0,
     z: f32 = 0.0,
+
+    pub fn extend(self: Vec3, w: f32) Vec4 {
+        return .{ .x = self.x, .y = self.y, .z = self.z, .w = w };
+    }
 };
 
 const Vec4 = packed struct {
@@ -46,6 +56,17 @@ const Vertex = packed struct {
     normal: Vec3 = .{ .x = 0.0, .y = 0.0, .z = 0.0 },
     uv_y: f32 = 0.0,
     color: Vec4 = .{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 0.0 },
+};
+
+const MeshAsset = struct {
+    name: [:0]const u8,
+    surfaces: []SurfaceInfo,
+    mesh: GpuMesh,
+
+    const SurfaceInfo = struct {
+        start_index: u32,
+        count: u32,
+    };
 };
 
 const GpuMesh = struct {
@@ -134,12 +155,18 @@ imgui_pool: vk.VkDescriptorPool = undefined,
 selected_compute_data: i32 = 0,
 compute_data: [2]ComputeData = undefined,
 
+triangle_show: bool = true,
 triangle_pipeline_layout: vk.VkPipelineLayout = undefined,
 triangle_pipeline: vk.VkPipeline = undefined,
 
 mesh_pipeline_layout: vk.VkPipelineLayout = undefined,
 mesh_pipeline: vk.VkPipeline = undefined,
+
+rectangle_show: bool = true,
 rectangle: GpuMesh = undefined,
+
+selected_mesh: i32 = 0,
+mesh_assets: std.ArrayListUnmanaged(MeshAsset) = undefined,
 
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
@@ -174,7 +201,6 @@ pub fn init(allocator: Allocator) !Self {
         .allocator = allocator,
         .window = window,
     };
-
     try self.create_vk_instance(sdl_extensions);
     try self.create_debug_messanger();
 
@@ -209,6 +235,9 @@ pub fn init(allocator: Allocator) !Self {
 
     try self.init_imgui();
 
+    try self.load_gltf_meshes("assets/monkey.glb");
+    try self.load_gltf_meshes("assets/basicmesh.glb");
+
     return self;
 }
 
@@ -221,6 +250,14 @@ pub fn deinit(self: *Self) void {
 
     vk.vkDestroyFence(self.vk_logical_device.device, self.immediate_fence, null);
     vk.vkDestroyCommandPool(self.vk_logical_device.device, self.immediate_command_pool, null);
+
+    for (self.mesh_assets.items) |*asset| {
+        self.allocator.free(asset.name);
+        self.allocator.free(asset.surfaces);
+        self.destroy_buffer(&asset.mesh.index_buffer);
+        self.destroy_buffer(&asset.mesh.vertex_buffer);
+    }
+    self.mesh_assets.deinit(self.allocator);
 
     self.destroy_buffer(&self.rectangle.index_buffer);
     self.destroy_buffer(&self.rectangle.vertex_buffer);
@@ -288,10 +325,10 @@ pub fn run(self: *Self) !void {
         cimgui.igNewFrame();
 
         var open = true;
-        if (cimgui.igBegin("Background parameters", &open, 0)) {
+        if (cimgui.igBegin("Parameters", &open, 0)) {
             const current_compute_data = &self.compute_data[@intCast(self.selected_compute_data)];
 
-            _ = cimgui.igText("Shader name", current_compute_data.name.ptr);
+            _ = cimgui.igText("Shader name: %s", current_compute_data.name.ptr);
 
             _ = cimgui.igSliderInt("Shader index", &self.selected_compute_data, 0, self.compute_data.len - 1, null, 0);
 
@@ -299,8 +336,15 @@ pub fn run(self: *Self) !void {
             _ = cimgui.igInputFloat4("data2", @ptrCast(&current_compute_data.constants.data2), null, 0);
             _ = cimgui.igInputFloat4("data3", @ptrCast(&current_compute_data.constants.data3), null, 0);
             _ = cimgui.igInputFloat4("data4", @ptrCast(&current_compute_data.constants.data4), null, 0);
+
+            _ = cimgui.igCheckbox("Show triangle", &self.triangle_show);
+            _ = cimgui.igCheckbox("Show rectangle", &self.rectangle_show);
+            const current_mesh = &self.mesh_assets.items[@intCast(self.selected_mesh)];
+            _ = cimgui.igText("Mesh name: %s", current_mesh.name.ptr);
+            _ = cimgui.igSliderInt("Mesh index", &self.selected_mesh, 0, @intCast(self.mesh_assets.items.len - 1), null, 0);
+
+            cimgui.igEnd();
         }
-        cimgui.igEnd();
 
         cimgui.igRender();
 
@@ -505,7 +549,6 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
     };
     vk.vkCmdBeginRendering(buffer, &render_info);
 
-    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.triangle_pipeline);
     const viewport = vk.VkViewport{
         .x = 0.0,
         .y = 0.0,
@@ -523,13 +566,36 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
         .height = self.draw_image.extent.height,
     } };
     vk.vkCmdSetScissor(buffer, 0, 1, &scissor);
-    vk.vkCmdDraw(buffer, 3, 1, 0, 0);
 
+    // Draw triangle
+    if (self.triangle_show) {
+        vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.triangle_pipeline);
+        vk.vkCmdDraw(buffer, 3, 1, 0, 0);
+    }
+
+    // Draw meshes
     vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.mesh_pipeline);
-    const gpu_push_constatns = GpuPushConstants{
+    // Rectangle
+    var gpu_push_constatns = GpuPushConstants{
         .world_matrix = Mat4.IDENDITY,
         .device_address = self.rectangle.vertex_device_address,
     };
+    if (self.rectangle_show) {
+        vk.vkCmdPushConstants(
+            buffer,
+            self.mesh_pipeline_layout,
+            vk.VK_SHADER_STAGE_VERTEX_BIT,
+            0,
+            @sizeOf(GpuPushConstants),
+            &gpu_push_constatns,
+        );
+        vk.vkCmdBindIndexBuffer(buffer, self.rectangle.index_buffer.buffer, 0, vk.VK_INDEX_TYPE_UINT32);
+        vk.vkCmdDrawIndexed(buffer, 6, 1, 0, 0, 0);
+    }
+
+    // Other meshes
+    const asset = self.mesh_assets.items[@intCast(self.selected_mesh)];
+    gpu_push_constatns.device_address = asset.mesh.vertex_device_address;
     vk.vkCmdPushConstants(
         buffer,
         self.mesh_pipeline_layout,
@@ -538,8 +604,8 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
         @sizeOf(GpuPushConstants),
         &gpu_push_constatns,
     );
-    vk.vkCmdBindIndexBuffer(buffer, self.rectangle.index_buffer.buffer, 0, vk.VK_INDEX_TYPE_UINT32);
-    vk.vkCmdDrawIndexed(buffer, 6, 1, 0, 0, 0);
+    vk.vkCmdBindIndexBuffer(buffer, asset.mesh.index_buffer.buffer, 0, vk.VK_INDEX_TYPE_UINT32);
+    vk.vkCmdDrawIndexed(buffer, asset.surfaces[0].count, 1, asset.surfaces[0].start_index, 0, 0);
 
     vk.vkCmdEndRendering(buffer);
 }
@@ -1514,4 +1580,115 @@ pub fn init_default_mesh(self: *Self) !void {
     };
     const indices = [_]u32{ 0, 1, 2, 2, 1, 3 };
     self.rectangle = try self.create_gpu_mesh(&indices, &vertices);
+}
+
+pub fn load_gltf_meshes(self: *Self, path: [:0]const u8) !void {
+    std.log.info("Loading gltf mesh from path: {s}", .{path});
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    const options = cgltf.cgltf_options{};
+    var data: *cgltf.cgltf_data = undefined;
+    if (cgltf.cgltf_parse_file(&options, path.ptr, @ptrCast(&data)) != cgltf.cgltf_result_success) {
+        return error.cgltf_parse_file_error;
+    }
+    if (cgltf.cgltf_load_buffers(&options, data, path.ptr) != cgltf.cgltf_result_success) {
+        return error.cgltf_load_buffers;
+    }
+
+    for (data.meshes[0..data.meshes_count]) |mesh| {
+        _ = arena.reset(.retain_capacity);
+
+        var indices: std.ArrayListUnmanaged(u32) = .{};
+        var vertices: std.ArrayListUnmanaged(Vertex) = .{};
+
+        std.log.info("Mesh name: {s}", .{mesh.name});
+        var mesh_asset: MeshAsset = undefined;
+        mesh_asset.name = try self.allocator.dupeZ(u8, std.mem.span(mesh.name));
+        mesh_asset.surfaces = try self.allocator.alloc(MeshAsset.SurfaceInfo, mesh.primitives_count);
+
+        for (mesh.primitives[0..mesh.primitives_count], mesh_asset.surfaces) |primitive, *surface| {
+            surface.* = .{
+                .start_index = @intCast(indices.items.len),
+                .count = @intCast(primitive.indices[0].count),
+            };
+            std.log.info("Surface info: {any}", .{surface});
+
+            const initial_vertex_num = vertices.items.len;
+            const initial_index_num = indices.items.len;
+
+            try indices.resize(arena_allocator, initial_index_num + primitive.indices[0].count);
+            for (indices.items[initial_index_num..], 0..) |*i, j| {
+                const index = cgltf.cgltf_accessor_read_index(primitive.indices, j);
+                i.* = @intCast(initial_vertex_num + index);
+            }
+
+            try vertices.resize(arena_allocator, vertices.items.len + primitive.attributes[0].data[0].count);
+
+            std.log.info("Mesh primitive type: {}", .{primitive.type});
+            for (primitive.attributes[0..primitive.attributes_count]) |attr| {
+                std.log.info("Mesh primitive attr name: {s}, type: {}, index: {}, data type: {}, data count: {}", .{
+                    attr.name,
+                    attr.type,
+                    attr.index,
+                    attr.data[0].type,
+                    attr.data[0].count,
+                });
+                const num_floats = cgltf.cgltf_accessor_unpack_floats(attr.data, null, 0);
+                const floats = try arena_allocator.alloc(f32, num_floats);
+                _ = cgltf.cgltf_accessor_unpack_floats(attr.data, floats.ptr, num_floats);
+
+                switch (attr.type) {
+                    cgltf.cgltf_attribute_type_position => {
+                        const num_components = cgltf.cgltf_num_components(attr.data[0].type);
+                        std.log.info("Position has components: {}", .{num_components});
+                        std.debug.assert(num_components == 3);
+
+                        for (vertices.items[initial_vertex_num..], 0..) |*vertex, v| {
+                            const v3: [*]const f32 = @ptrCast(&floats[v * num_components]);
+                            vertex.position.x = v3[0];
+                            vertex.position.y = v3[1];
+                            vertex.position.z = v3[2];
+                        }
+                    },
+                    cgltf.cgltf_attribute_type_normal => {
+                        const num_components = cgltf.cgltf_num_components(attr.data[0].type);
+                        std.log.info("Normal has components: {}", .{num_components});
+
+                        for (vertices.items[initial_vertex_num..], 0..) |*vertex, v| {
+                            const v3: [*]const f32 = @ptrCast(&floats[v * num_components]);
+                            vertex.normal.x = v3[0];
+                            vertex.normal.y = v3[1];
+                            vertex.normal.z = v3[2];
+                        }
+                    },
+                    cgltf.cgltf_attribute_type_texcoord => {
+                        const num_components = cgltf.cgltf_num_components(attr.data[0].type);
+                        std.log.info("Tx_coord has components: {}", .{num_components});
+
+                        for (vertices.items[initial_vertex_num..], 0..) |*vertex, v| {
+                            const v3: [*]const f32 = @ptrCast(&floats[v * num_components]);
+                            vertex.uv_x = v3[0];
+                            vertex.uv_y = v3[1];
+                        }
+                    },
+                    else => {
+                        std.log.err("Unknown attribute type: {}. Skipping", .{attr.type});
+                    },
+                }
+            }
+
+            // For debugging use normals as colors
+            for (vertices.items) |*v| {
+                v.color = v.normal.extend(1.0);
+            }
+
+            std.log.info("Creating mesh with {} indiced and {} vertices", .{ indices.items.len, vertices.items.len });
+            mesh_asset.mesh = try self.create_gpu_mesh(indices.items, vertices.items);
+            try self.mesh_assets.append(self.allocator, mesh_asset);
+        }
+    }
+
+    cgltf.cgltf_free(data);
 }

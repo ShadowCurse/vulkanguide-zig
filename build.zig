@@ -60,6 +60,9 @@ pub fn build(b: *std.Build) !void {
     exe.addIncludePath(b.path("thirdparty/vma"));
     exe.addCSourceFile(.{ .file = b.path("thirdparty/vma/vk_mem_alloc.cpp") });
 
+    exe.addIncludePath(b.path("thirdparty/cgltf/"));
+    exe.addCSourceFile(.{ .file = b.path("thirdparty/cgltf/cgltf.c") });
+
     exe.linkSystemLibrary("SDL2");
     exe.linkSystemLibrary("vulkan");
     exe.linkLibrary(cimgui);
