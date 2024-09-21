@@ -4,6 +4,12 @@ const vk = @import("vulkan.zig");
 const cimgui = @import("cimgui.zig");
 const cgltf = @import("cgltf.zig");
 
+const math = @import("math.zig");
+const Vec2 = math.Vec2;
+const Vec3 = math.Vec3;
+const Vec4 = math.Vec4;
+const Mat4 = math.Mat4;
+
 const Allocator = std.mem.Allocator;
 
 const Self = @This();
@@ -13,42 +19,6 @@ const HEIGHT = 720;
 const VK_VALIDATION_LAYERS_NAMES = [_][]const u8{"VK_LAYER_KHRONOS_validation"};
 const VK_ADDITIONAL_EXTENSIONS_NAMES = [_][]const u8{"VK_EXT_debug_utils"};
 const VK_PHYSICAL_DEVICE_EXTENSION_NAMES = [_][]const u8{"VK_KHR_swapchain"};
-
-const Vec2 = packed struct {
-    x: f32 = 0.0,
-    y: f32 = 0.0,
-};
-
-const Vec3 = packed struct {
-    x: f32 = 0.0,
-    y: f32 = 0.0,
-    z: f32 = 0.0,
-
-    pub fn extend(self: Vec3, w: f32) Vec4 {
-        return .{ .x = self.x, .y = self.y, .z = self.z, .w = w };
-    }
-};
-
-const Vec4 = packed struct {
-    x: f32 = 0.0,
-    y: f32 = 0.0,
-    z: f32 = 0.0,
-    w: f32 = 0.0,
-};
-
-const Mat4 = packed struct {
-    i: Vec4,
-    j: Vec4,
-    k: Vec4,
-    t: Vec4,
-
-    const IDENDITY = Mat4{
-        .i = Vec4{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 0.0 },
-        .j = Vec4{ .x = 0.0, .y = 1.0, .z = 0.0, .w = 0.0 },
-        .k = Vec4{ .x = 0.0, .y = 0.0, .z = 1.0, .w = 0.0 },
-        .t = Vec4{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 1.0 },
-    };
-};
 
 const Vertex = packed struct {
     position: Vec3 = .{ .x = 0.0, .y = 0.0, .z = 0.0 },
@@ -575,9 +545,20 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
 
     // Draw meshes
     vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.mesh_pipeline);
+
+    const view = Mat4.IDENDITY.translate(Vec3{ .x = 0.0, .y = 0.0, .z = -5.0 });
+    var projection = Mat4.perspective(
+        std.math.degreesToRadians(70.0),
+        @as(f32, @floatFromInt(self.draw_image.extent.width)) /
+            @as(f32, @floatFromInt(self.draw_image.extent.height)),
+        10000.0,
+        0.1,
+    );
+    projection.j.y *= -1.0;
+
     // Rectangle
     var gpu_push_constatns = GpuPushConstants{
-        .world_matrix = Mat4.IDENDITY,
+        .world_matrix = view.mul(projection),
         .device_address = self.rectangle.vertex_device_address,
     };
     if (self.rectangle_show) {
