@@ -20,7 +20,7 @@ const VK_VALIDATION_LAYERS_NAMES = [_][]const u8{"VK_LAYER_KHRONOS_validation"};
 const VK_ADDITIONAL_EXTENSIONS_NAMES = [_][]const u8{"VK_EXT_debug_utils"};
 const VK_PHYSICAL_DEVICE_EXTENSION_NAMES = [_][]const u8{"VK_KHR_swapchain"};
 
-const Vertex = packed struct {
+const Vertex = extern struct {
     position: Vec3 = .{ .x = 0.0, .y = 0.0, .z = 0.0 },
     uv_x: f32 = 0.0,
     normal: Vec3 = .{ .x = 0.0, .y = 0.0, .z = 0.0 },
@@ -45,12 +45,12 @@ const GpuMesh = struct {
     vertex_device_address: vk.VkDeviceAddress,
 };
 
-const GpuPushConstants = struct {
+const GpuPushConstants = extern struct {
     world_matrix: Mat4,
     device_address: vk.VkDeviceAddress,
 };
 
-const ComputePushConstants = packed struct {
+const ComputePushConstants = extern struct {
     data1: Vec4 = .{},
     data2: Vec4 = .{},
     data3: Vec4 = .{},
@@ -1665,32 +1665,39 @@ pub fn load_gltf_meshes(self: *Self, path: [:0]const u8) !void {
                         std.log.info("Position has components: {}", .{num_components});
                         std.debug.assert(num_components == 3);
 
-                        for (vertices.items[initial_vertex_num..], 0..) |*vertex, v| {
-                            const v3: [*]const f32 = @ptrCast(&floats[v * num_components]);
-                            vertex.position.x = v3[0];
-                            vertex.position.y = v3[1];
-                            vertex.position.z = v3[2];
+                        var positions: []const Vec3 = undefined;
+                        positions.ptr = @ptrCast(floats.ptr);
+                        positions.len = floats.len / 3;
+
+                        for (vertices.items[initial_vertex_num..], positions) |*vertex, position| {
+                            vertex.position = position;
                         }
                     },
                     cgltf.cgltf_attribute_type_normal => {
                         const num_components = cgltf.cgltf_num_components(attr.data[0].type);
                         std.log.info("Normal has components: {}", .{num_components});
+                        std.debug.assert(num_components == 3);
 
-                        for (vertices.items[initial_vertex_num..], 0..) |*vertex, v| {
-                            const v3: [*]const f32 = @ptrCast(&floats[v * num_components]);
-                            vertex.normal.x = v3[0];
-                            vertex.normal.y = v3[1];
-                            vertex.normal.z = v3[2];
+                        var normals: []const Vec3 = undefined;
+                        normals.ptr = @ptrCast(floats.ptr);
+                        normals.len = floats.len / 3;
+
+                        for (vertices.items[initial_vertex_num..], normals) |*vertex, normal| {
+                            vertex.normal = normal;
                         }
                     },
                     cgltf.cgltf_attribute_type_texcoord => {
                         const num_components = cgltf.cgltf_num_components(attr.data[0].type);
                         std.log.info("Tx_coord has components: {}", .{num_components});
+                        std.debug.assert(num_components == 2);
 
-                        for (vertices.items[initial_vertex_num..], 0..) |*vertex, v| {
-                            const v3: [*]const f32 = @ptrCast(&floats[v * num_components]);
-                            vertex.uv_x = v3[0];
-                            vertex.uv_y = v3[1];
+                        var uvs: []const Vec3 = undefined;
+                        uvs.ptr = @ptrCast(floats.ptr);
+                        uvs.len = floats.len / 2;
+
+                        for (vertices.items[initial_vertex_num..], uvs) |*vertex, uv| {
+                            vertex.uv_x = uv.x;
+                            vertex.uv_y = uv.y;
                         }
                     },
                     else => {

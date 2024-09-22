@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const Vec2 = packed struct {
+pub const Vec2 = extern struct {
     x: f32 = 0.0,
     y: f32 = 0.0,
 
@@ -13,7 +13,7 @@ pub const Vec2 = packed struct {
     }
 };
 
-pub const Vec3 = packed struct {
+pub const Vec3 = extern struct {
     x: f32 = 0.0,
     y: f32 = 0.0,
     z: f32 = 0.0,
@@ -27,7 +27,7 @@ pub const Vec3 = packed struct {
     }
 };
 
-pub const Vec4 = packed struct {
+pub const Vec4 = extern struct {
     x: f32 = 0.0,
     y: f32 = 0.0,
     z: f32 = 0.0,
@@ -51,7 +51,7 @@ pub const Vec4 = packed struct {
     }
 };
 
-pub const Mat4 = packed struct {
+pub const Mat4 = extern struct {
     i: Vec4 = .{},
     j: Vec4 = .{},
     k: Vec4 = .{},
