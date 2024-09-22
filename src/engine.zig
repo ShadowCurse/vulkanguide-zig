@@ -1110,7 +1110,7 @@ pub fn create_swap_chain(self: *Self) !void {
             .levelCount = 1,
             .baseArrayLayer = 0,
             .layerCount = 1,
-            .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            .aspectMask = vk.VK_IMAGE_ASPECT_DEPTH_BIT,
         },
     };
     try vk.check_result(vk.vkCreateImageView(
