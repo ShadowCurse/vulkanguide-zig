@@ -129,9 +129,6 @@ compute_data: [2]ComputeData = undefined,
 mesh_pipeline_layout: vk.VkPipelineLayout = undefined,
 mesh_pipeline: vk.VkPipeline = undefined,
 
-rectangle_show: bool = true,
-rectangle: GpuMesh = undefined,
-
 selected_mesh: i32 = 0,
 mesh_assets: std.ArrayListUnmanaged(MeshAsset) = undefined,
 
@@ -195,9 +192,7 @@ pub fn init(allocator: Allocator) !Self {
     try self.create_immediate_objects();
 
     try self.create_compute_pipelines();
-
     try self.create_mesh_pipeline();
-    try self.init_default_mesh();
 
     try self.init_imgui();
 
@@ -225,8 +220,6 @@ pub fn deinit(self: *Self) void {
     }
     self.mesh_assets.deinit(self.allocator);
 
-    self.destroy_buffer(&self.rectangle.index_buffer);
-    self.destroy_buffer(&self.rectangle.vertex_buffer);
     vk.vkDestroyPipelineLayout(self.vk_logical_device.device, self.mesh_pipeline_layout, null);
     vk.vkDestroyPipeline(self.vk_logical_device.device, self.mesh_pipeline, null);
 
@@ -303,7 +296,6 @@ pub fn run(self: *Self) !void {
             _ = cimgui.igInputFloat4("data3", @ptrCast(&current_compute_data.constants.data3), null, 0);
             _ = cimgui.igInputFloat4("data4", @ptrCast(&current_compute_data.constants.data4), null, 0);
 
-            _ = cimgui.igCheckbox("Show rectangle", &self.rectangle_show);
             const current_mesh = &self.mesh_assets.items[@intCast(self.selected_mesh)];
             _ = cimgui.igText("Mesh name: %s", current_mesh.name.ptr);
             _ = cimgui.igSliderInt("Mesh index", &self.selected_mesh, 0, @intCast(self.mesh_assets.items.len - 1), null, 0);
@@ -561,23 +553,10 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
     );
     projection.j.y *= -1.0;
 
-    // Rectangle
     var gpu_push_constatns = GpuPushConstants{
         .world_matrix = view.mul(projection),
-        .device_address = self.rectangle.vertex_device_address,
+        .device_address = undefined,
     };
-    if (self.rectangle_show) {
-        vk.vkCmdPushConstants(
-            buffer,
-            self.mesh_pipeline_layout,
-            vk.VK_SHADER_STAGE_VERTEX_BIT,
-            0,
-            @sizeOf(GpuPushConstants),
-            &gpu_push_constatns,
-        );
-        vk.vkCmdBindIndexBuffer(buffer, self.rectangle.index_buffer.buffer, 0, vk.VK_INDEX_TYPE_UINT32);
-        vk.vkCmdDrawIndexed(buffer, 6, 1, 0, 0, 0);
-    }
 
     // Other meshes
     const asset = self.mesh_assets.items[@intCast(self.selected_mesh)];
@@ -1564,29 +1543,6 @@ pub fn create_gpu_mesh(self: *const Self, indices: []const u32, vertices: []cons
     }
 
     return new_mesh;
-}
-
-pub fn init_default_mesh(self: *Self) !void {
-    const vertices = [_]Vertex{
-        .{
-            .position = .{ .x = 0.5, .y = -0.5, .z = 0.0 },
-            .color = .{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 1.0 },
-        },
-        .{
-            .position = .{ .x = 0.5, .y = 0.5, .z = 0.0 },
-            .color = .{ .x = 0.5, .y = 0.5, .z = 0.5, .w = 1.0 },
-        },
-        .{
-            .position = .{ .x = -0.5, .y = -0.5, .z = 0.0 },
-            .color = .{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 1.0 },
-        },
-        .{
-            .position = .{ .x = -0.5, .y = 0.5, .z = 0.0 },
-            .color = .{ .x = 0.0, .y = 1.0, .z = 0.0, .w = 1.0 },
-        },
-    };
-    const indices = [_]u32{ 0, 1, 2, 2, 1, 3 };
-    self.rectangle = try self.create_gpu_mesh(&indices, &vertices);
 }
 
 pub fn load_gltf_meshes(self: *Self, path: [:0]const u8) !void {
