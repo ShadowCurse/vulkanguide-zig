@@ -142,7 +142,7 @@ pub fn init(allocator: Allocator) !Self {
         sdl.SDL_WINDOWPOS_UNDEFINED,
         WIDTH,
         HEIGHT,
-        sdl.SDL_WINDOW_VULKAN,
+        sdl.SDL_WINDOW_VULKAN | sdl.SDL_WINDOW_RESIZABLE,
     ) orelse {
         return error.SDLCreateWindow;
     };
@@ -319,14 +319,31 @@ pub fn run(self: *Self) !void {
 
         // Get new image
         var image_index: u32 = 0;
-        try vk.check_result(vk.vkAcquireNextImageKHR(
+        const aquire_result = vk.vkAcquireNextImageKHR(
             self.vk_logical_device.device,
             self.vk_swap_chain.swap_chain,
             Self.TIMEOUT,
             current_commands.swap_chain_semaphore,
             null,
             &image_index,
-        ));
+        );
+        // If window is resized, recreate swap chain
+        // and try again
+        if (aquire_result == vk.VK_ERROR_OUT_OF_DATE_KHR or
+            aquire_result == vk.VK_SUBOPTIMAL_KHR)
+        {
+            try self.recreate_swap_chain();
+            try vk.check_result(vk.vkAcquireNextImageKHR(
+                self.vk_logical_device.device,
+                self.vk_swap_chain.swap_chain,
+                Self.TIMEOUT,
+                null,
+                null,
+                &image_index,
+            ));
+        } else {
+            try vk.check_result(aquire_result);
+        }
 
         // Write commands
         try vk.check_result(vk.vkResetCommandBuffer(current_commands.buffer, 0));
@@ -458,7 +475,14 @@ pub fn run(self: *Self) !void {
             .waitSemaphoreCount = 1,
             .pImageIndices = &image_index,
         };
-        try vk.check_result(vk.vkQueuePresentKHR(self.vk_logical_device.graphics_queue, &present_info));
+        const present_result = vk.vkQueuePresentKHR(self.vk_logical_device.graphics_queue, &present_info);
+        if (present_result == vk.VK_ERROR_OUT_OF_DATE_KHR or
+            present_result == vk.VK_SUBOPTIMAL_KHR)
+        {
+            try self.recreate_swap_chain();
+        } else {
+            try vk.check_result(present_result);
+        }
         self.current_frame += 1;
     }
 }
@@ -1119,6 +1143,39 @@ pub fn create_swap_chain(self: *Self) !void {
         null,
         &self.depth_image.view,
     ));
+}
+
+pub fn recreate_swap_chain(self: *Self) !void {
+    try vk.check_result(vk.vkDeviceWaitIdle(self.vk_logical_device.device));
+
+    for (self.vk_swap_chain.image_views) |view| {
+        vk.vkDestroyImageView(self.vk_logical_device.device, view, null);
+    }
+    vk.vkDestroySwapchainKHR(self.vk_logical_device.device, self.vk_swap_chain.swap_chain, null);
+    self.allocator.free(self.vk_swap_chain.images);
+    self.allocator.free(self.vk_swap_chain.image_views);
+
+    vk.vkDestroyImageView(self.vk_logical_device.device, self.depth_image.view, null);
+    vk.vmaDestroyImage(self.vma_allocator, self.depth_image.image, self.depth_image.allocation);
+
+    vk.vkDestroyImageView(self.vk_logical_device.device, self.draw_image.view, null);
+    vk.vmaDestroyImage(self.vma_allocator, self.draw_image.image, self.draw_image.allocation);
+
+    try self.create_swap_chain();
+
+    const desc_image_info = vk.VkDescriptorImageInfo{
+        .imageLayout = vk.VK_IMAGE_LAYOUT_GENERAL,
+        .imageView = self.draw_image.view,
+    };
+    const desc_image_write = vk.VkWriteDescriptorSet{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstBinding = 0,
+        .dstSet = self.draw_image_desc_set,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+        .pImageInfo = &desc_image_info,
+    };
+    vk.vkUpdateDescriptorSets(self.vk_logical_device.device, 1, &desc_image_write, 0, null);
 }
 
 pub fn create_commands(self: *Self) !void {
