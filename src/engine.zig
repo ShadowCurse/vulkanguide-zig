@@ -126,10 +126,6 @@ imgui_pool: vk.VkDescriptorPool = undefined,
 selected_compute_data: i32 = 0,
 compute_data: [2]ComputeData = undefined,
 
-triangle_show: bool = true,
-triangle_pipeline_layout: vk.VkPipelineLayout = undefined,
-triangle_pipeline: vk.VkPipeline = undefined,
-
 mesh_pipeline_layout: vk.VkPipelineLayout = undefined,
 mesh_pipeline: vk.VkPipeline = undefined,
 
@@ -199,7 +195,6 @@ pub fn init(allocator: Allocator) !Self {
     try self.create_immediate_objects();
 
     try self.create_compute_pipelines();
-    try self.create_triangle_pipeline();
 
     try self.create_mesh_pipeline();
     try self.init_default_mesh();
@@ -234,9 +229,6 @@ pub fn deinit(self: *Self) void {
     self.destroy_buffer(&self.rectangle.vertex_buffer);
     vk.vkDestroyPipelineLayout(self.vk_logical_device.device, self.mesh_pipeline_layout, null);
     vk.vkDestroyPipeline(self.vk_logical_device.device, self.mesh_pipeline, null);
-
-    vk.vkDestroyPipelineLayout(self.vk_logical_device.device, self.triangle_pipeline_layout, null);
-    vk.vkDestroyPipeline(self.vk_logical_device.device, self.triangle_pipeline, null);
 
     for (self.compute_data) |data| {
         vk.vkDestroyPipelineLayout(self.vk_logical_device.device, data.layout, null);
@@ -311,7 +303,6 @@ pub fn run(self: *Self) !void {
             _ = cimgui.igInputFloat4("data3", @ptrCast(&current_compute_data.constants.data3), null, 0);
             _ = cimgui.igInputFloat4("data4", @ptrCast(&current_compute_data.constants.data4), null, 0);
 
-            _ = cimgui.igCheckbox("Show triangle", &self.triangle_show);
             _ = cimgui.igCheckbox("Show rectangle", &self.rectangle_show);
             const current_mesh = &self.mesh_assets.items[@intCast(self.selected_mesh)];
             _ = cimgui.igText("Mesh name: %s", current_mesh.name.ptr);
@@ -556,12 +547,6 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
         .height = self.draw_image.extent.height,
     } };
     vk.vkCmdSetScissor(buffer, 0, 1, &scissor);
-
-    // Draw triangle
-    if (self.triangle_show) {
-        vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.triangle_pipeline);
-        vk.vkCmdDraw(buffer, 3, 1, 0, 0);
-    }
 
     // Draw meshes
     vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.mesh_pipeline);
@@ -1451,41 +1436,10 @@ pub fn init_imgui(self: *Self) !void {
     _ = cimgui.ImGui_ImplVulkan_CreateFontsTexture();
 }
 
-pub fn create_triangle_pipeline(self: *Self) !void {
-    const vertex_shader_module = try self.load_shader_module("triangle_vert.spv");
-    defer vk.vkDestroyShaderModule(self.vk_logical_device.device, vertex_shader_module, null);
-    const fragment_shader_module = try self.load_shader_module("triangle_frag.spv");
-    defer vk.vkDestroyShaderModule(self.vk_logical_device.device, fragment_shader_module, null);
-
-    const layout_create_info = vk.VkPipelineLayoutCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-    };
-    try vk.check_result(vk.vkCreatePipelineLayout(
-        self.vk_logical_device.device,
-        &layout_create_info,
-        null,
-        &self.triangle_pipeline_layout,
-    ));
-
-    var builder: vk.PipelineBuilder = .{};
-    self.triangle_pipeline = try builder
-        .layout(self.triangle_pipeline_layout)
-        .shaders(vertex_shader_module, fragment_shader_module)
-        .input_topology(vk.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
-        .polygon_mode(vk.VK_POLYGON_MODE_FILL)
-        .cull_mode(vk.VK_CULL_MODE_NONE, vk.VK_FRONT_FACE_CLOCKWISE)
-        .multisampling_none()
-        .blending_none()
-        .color_attachment_format(self.draw_image.format)
-        .depthtest_none()
-        .depth_format(vk.VK_FORMAT_D32_SFLOAT)
-        .build(self.vk_logical_device.device);
-}
-
 pub fn create_mesh_pipeline(self: *Self) !void {
     const vertex_shader_module = try self.load_shader_module("mesh_vert.spv");
     defer vk.vkDestroyShaderModule(self.vk_logical_device.device, vertex_shader_module, null);
-    const fragment_shader_module = try self.load_shader_module("triangle_frag.spv");
+    const fragment_shader_module = try self.load_shader_module("mesh_frag.spv");
     defer vk.vkDestroyShaderModule(self.vk_logical_device.device, fragment_shader_module, null);
 
     const push_constant_range = vk.VkPushConstantRange{
