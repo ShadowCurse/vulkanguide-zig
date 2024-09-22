@@ -203,6 +203,36 @@ pub const PipelineBuilder = struct {
         return self;
     }
 
+    pub fn blending_additive(self: *Self) *Self {
+        self.color_blend_attachment.colorWriteMask = vk.VK_COLOR_COMPONENT_R_BIT |
+            vk.VK_COLOR_COMPONENT_G_BIT |
+            vk.VK_COLOR_COMPONENT_B_BIT |
+            vk.VK_COLOR_COMPONENT_A_BIT;
+        self.color_blend_attachment.blendEnable = vk.VK_TRUE;
+        self.color_blend_attachment.srcColorBlendFactor = vk.VK_BLEND_FACTOR_SRC_ALPHA;
+        self.color_blend_attachment.dstColorBlendFactor = vk.VK_BLEND_FACTOR_ONE;
+        self.color_blend_attachment.colorBlendOp = vk.VK_BLEND_OP_ADD;
+        self.color_blend_attachment.srcAlphaBlendFactor = vk.VK_BLEND_FACTOR_ONE;
+        self.color_blend_attachment.dstAlphaBlendFactor = vk.VK_BLEND_FACTOR_ZERO;
+        self.color_blend_attachment.colorBlendOp = vk.VK_BLEND_OP_ADD;
+        return self;
+    }
+
+    pub fn blending_alphablend(self: *Self) *Self {
+        self.color_blend_attachment.colorWriteMask = vk.VK_COLOR_COMPONENT_R_BIT |
+            vk.VK_COLOR_COMPONENT_G_BIT |
+            vk.VK_COLOR_COMPONENT_B_BIT |
+            vk.VK_COLOR_COMPONENT_A_BIT;
+        self.color_blend_attachment.blendEnable = vk.VK_TRUE;
+        self.color_blend_attachment.srcColorBlendFactor = vk.VK_BLEND_FACTOR_SRC_ALPHA;
+        self.color_blend_attachment.dstColorBlendFactor = vk.VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        self.color_blend_attachment.colorBlendOp = vk.VK_BLEND_OP_ADD;
+        self.color_blend_attachment.srcAlphaBlendFactor = vk.VK_BLEND_FACTOR_ONE;
+        self.color_blend_attachment.dstAlphaBlendFactor = vk.VK_BLEND_FACTOR_ZERO;
+        self.color_blend_attachment.colorBlendOp = vk.VK_BLEND_OP_ADD;
+        return self;
+    }
+
     pub fn color_attachment_format(self: *Self, format: vk.VkFormat) *Self {
         self._color_attachment_format = format;
         return self;

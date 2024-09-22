@@ -1447,7 +1447,7 @@ pub fn create_mesh_pipeline(self: *Self) !void {
         .polygon_mode(vk.VK_POLYGON_MODE_FILL)
         .cull_mode(vk.VK_CULL_MODE_NONE, vk.VK_FRONT_FACE_CLOCKWISE)
         .multisampling_none()
-        .blending_none()
+        .blending_additive()
         .color_attachment_format(self.draw_image.format)
         .depthtest(true, vk.VK_COMPARE_OP_GREATER_OR_EQUAL)
         .depth_format(self.depth_image.format)
