@@ -37,12 +37,23 @@ const MeshAsset = struct {
         start_index: u32,
         count: u32,
     };
+
+    pub fn deinit(self: *const MeshAsset, allocator: *Allocator, vma_allocator: vk.VmaAllocator) void {
+        allocator.free(self.name);
+        allocator.free(self.surfaces);
+        self.mesh.deinit(vma_allocator);
+    }
 };
 
 const GpuMesh = struct {
     index_buffer: vk.AllocatedBuffer,
     vertex_buffer: vk.AllocatedBuffer,
     vertex_device_address: vk.VkDeviceAddress,
+
+    pub fn deinit(self: *const GpuMesh, vma_allocator: vk.VmaAllocator) void {
+        vk.vmaDestroyBuffer(vma_allocator, self.index_buffer.buffer, self.index_buffer.allocation);
+        vk.vmaDestroyBuffer(vma_allocator, self.vertex_buffer.buffer, self.vertex_buffer.allocation);
+    }
 };
 
 const GpuPushConstants = extern struct {
@@ -62,6 +73,11 @@ const ComputeData = struct {
     constants: ComputePushConstants,
     pipeline: vk.VkPipeline,
     layout: vk.VkPipelineLayout,
+
+    pub fn deinit(self: *const ComputeData, device: vk.VkDevice) void {
+        vk.vkDestroyPipelineLayout(device, self.layout, null);
+        vk.vkDestroyPipeline(device, self.pipeline, null);
+    }
 };
 
 const PhysicalDevice = struct {
@@ -86,6 +102,15 @@ const Swapchain = struct {
     image_views: []vk.VkImageView,
     format: vk.VkFormat,
     extent: vk.VkExtent2D,
+
+    pub fn deinit(self: *const Swapchain, device: vk.VkDevice, allocator: *const Allocator) void {
+        for (self.image_views) |view| {
+            vk.vkDestroyImageView(device, view, null);
+        }
+        vk.vkDestroySwapchainKHR(device, self.swap_chain, null);
+        allocator.free(self.images);
+        allocator.free(self.image_views);
+    }
 };
 
 const Commands = struct {
@@ -94,6 +119,13 @@ const Commands = struct {
     swap_chain_semaphore: vk.VkSemaphore,
     render_semaphore: vk.VkSemaphore,
     render_fence: vk.VkFence,
+
+    pub fn deinit(self: *const Commands, device: vk.VkDevice) void {
+        vk.vkDestroyFence(device, self.render_fence, null);
+        vk.vkDestroySemaphore(device, self.render_semaphore, null);
+        vk.vkDestroySemaphore(device, self.swap_chain_semaphore, null);
+        vk.vkDestroyCommandPool(device, self.pool, null);
+    }
 };
 
 const FRAMES = 2;
@@ -212,11 +244,8 @@ pub fn deinit(self: *Self) void {
     vk.vkDestroyFence(self.vk_logical_device.device, self.immediate_fence, null);
     vk.vkDestroyCommandPool(self.vk_logical_device.device, self.immediate_command_pool, null);
 
-    for (self.mesh_assets.items) |*asset| {
-        self.allocator.free(asset.name);
-        self.allocator.free(asset.surfaces);
-        self.destroy_buffer(&asset.mesh.index_buffer);
-        self.destroy_buffer(&asset.mesh.vertex_buffer);
+    for (self.mesh_assets.items) |asset| {
+        asset.deinit(&self.allocator, self.vma_allocator);
     }
     self.mesh_assets.deinit(self.allocator);
 
@@ -224,34 +253,22 @@ pub fn deinit(self: *Self) void {
     vk.vkDestroyPipeline(self.vk_logical_device.device, self.mesh_pipeline, null);
 
     for (self.compute_data) |data| {
-        vk.vkDestroyPipelineLayout(self.vk_logical_device.device, data.layout, null);
-        vk.vkDestroyPipeline(self.vk_logical_device.device, data.pipeline, null);
+        data.deinit(self.vk_logical_device.device);
     }
 
     vk.vkDestroyDescriptorSetLayout(self.vk_logical_device.device, self.draw_image_desc_set_layout, null);
     vk.vkDestroyDescriptorPool(self.vk_logical_device.device, self.vk_descriptor_pool, null);
 
-    vk.vkDestroyImageView(self.vk_logical_device.device, self.depth_image.view, null);
-    vk.vmaDestroyImage(self.vma_allocator, self.depth_image.image, self.depth_image.allocation);
-
-    vk.vkDestroyImageView(self.vk_logical_device.device, self.draw_image.view, null);
-    vk.vmaDestroyImage(self.vma_allocator, self.draw_image.image, self.draw_image.allocation);
+    self.depth_image.deinit(self.vk_logical_device.device, self.vma_allocator);
+    self.draw_image.deinit(self.vk_logical_device.device, self.vma_allocator);
 
     vk.vmaDestroyAllocator(self.vma_allocator);
 
     for (self.vk_commands) |command| {
-        vk.vkDestroyFence(self.vk_logical_device.device, command.render_fence, null);
-        vk.vkDestroySemaphore(self.vk_logical_device.device, command.render_semaphore, null);
-        vk.vkDestroySemaphore(self.vk_logical_device.device, command.swap_chain_semaphore, null);
-        vk.vkDestroyCommandPool(self.vk_logical_device.device, command.pool, null);
+        command.deinit(self.vk_logical_device.device);
     }
 
-    for (self.vk_swap_chain.image_views) |view| {
-        vk.vkDestroyImageView(self.vk_logical_device.device, view, null);
-    }
-    vk.vkDestroySwapchainKHR(self.vk_logical_device.device, self.vk_swap_chain.swap_chain, null);
-    self.allocator.free(self.vk_swap_chain.images);
-    self.allocator.free(self.vk_swap_chain.image_views);
+    self.vk_swap_chain.deinit(self.vk_logical_device.device, &self.allocator);
 
     vk.vkDestroyDevice(self.vk_logical_device.device, null);
     vk.vkDestroySurfaceKHR(self.vk_instance, self.surface, null);
@@ -1148,18 +1165,9 @@ pub fn create_swap_chain(self: *Self) !void {
 pub fn recreate_swap_chain(self: *Self) !void {
     try vk.check_result(vk.vkDeviceWaitIdle(self.vk_logical_device.device));
 
-    for (self.vk_swap_chain.image_views) |view| {
-        vk.vkDestroyImageView(self.vk_logical_device.device, view, null);
-    }
-    vk.vkDestroySwapchainKHR(self.vk_logical_device.device, self.vk_swap_chain.swap_chain, null);
-    self.allocator.free(self.vk_swap_chain.images);
-    self.allocator.free(self.vk_swap_chain.image_views);
-
-    vk.vkDestroyImageView(self.vk_logical_device.device, self.depth_image.view, null);
-    vk.vmaDestroyImage(self.vma_allocator, self.depth_image.image, self.depth_image.allocation);
-
-    vk.vkDestroyImageView(self.vk_logical_device.device, self.draw_image.view, null);
-    vk.vmaDestroyImage(self.vma_allocator, self.draw_image.image, self.draw_image.allocation);
+    self.vk_swap_chain.deinit(self.vk_logical_device.device, &self.allocator);
+    self.depth_image.deinit(self.vk_logical_device.device, self.vma_allocator);
+    self.draw_image.deinit(self.vk_logical_device.device, self.vma_allocator);
 
     try self.create_swap_chain();
 
@@ -1533,10 +1541,6 @@ pub fn create_buffer(self: *const Self, size: usize, usage: vk.VkBufferUsageFlag
     return new_buffer;
 }
 
-pub fn destroy_buffer(self: *const Self, buffer: *const vk.AllocatedBuffer) void {
-    vk.vmaDestroyBuffer(self.vma_allocator, buffer.buffer, buffer.allocation);
-}
-
 pub fn create_gpu_mesh(self: *const Self, indices: []const u32, vertices: []const Vertex) !GpuMesh {
     const index_buffer_size = indices.len * @sizeOf(u32);
     const vertex_buffer_size = vertices.len * @sizeOf(Vertex);
@@ -1563,7 +1567,7 @@ pub fn create_gpu_mesh(self: *const Self, indices: []const u32, vertices: []cons
         vk.VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         vk.VMA_MEMORY_USAGE_CPU_ONLY,
     );
-    defer self.destroy_buffer(&staging_buffer);
+    defer vk.vmaDestroyBuffer(self.vma_allocator, staging_buffer.buffer, staging_buffer.allocation);
 
     var vertex_buffer_slice: []Vertex = undefined;
     vertex_buffer_slice.ptr = @alignCast(@ptrCast(staging_buffer.allocation_info.pMappedData));

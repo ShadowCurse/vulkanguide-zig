@@ -13,6 +13,11 @@ pub const AllocatedImage = struct {
     extent: vk.VkExtent3D,
     format: vk.VkFormat,
     allocation: vk.VmaAllocation,
+
+    pub fn deinit(self: *const AllocatedImage, device: vk.VkDevice, vma_allocator: vk.VmaAllocator) void {
+        vk.vkDestroyImageView(device, self.view, null);
+        vk.vmaDestroyImage(vma_allocator, self.image, self.allocation);
+    }
 };
 
 pub const AllocatedBuffer = struct {
