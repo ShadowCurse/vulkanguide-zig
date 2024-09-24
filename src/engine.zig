@@ -1055,111 +1055,21 @@ pub fn create_swap_chain(self: *Self) !void {
         );
     }
 
-    // Draw image
-    self.draw_image.extent = vk.VkExtent3D{
-        .width = self.vk_swap_chain.extent.width,
-        .height = self.vk_swap_chain.extent.height,
-        .depth = 1,
-    };
-    self.draw_image.format = vk.VK_FORMAT_R16G16B16A16_SFLOAT;
-    const image_usage = vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-        vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-        vk.VK_IMAGE_USAGE_STORAGE_BIT |
-        vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    const image_create_info = vk.VkImageCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .imageType = vk.VK_IMAGE_TYPE_2D,
-        .format = self.draw_image.format,
-        .extent = self.draw_image.extent,
-        .usage = image_usage,
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        //for MSAA. we will not be using it by default, so default it to 1 sample per pixel.
-        .samples = vk.VK_SAMPLE_COUNT_1_BIT,
-        //optimal tiling, which means the image is stored on the best gpu format
-        .tiling = vk.VK_IMAGE_TILING_OPTIMAL,
-    };
-    const alloc_info = vk.VmaAllocationCreateInfo{
-        .usage = vk.VMA_MEMORY_USAGE_GPU_ONLY,
-        .requiredFlags = vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-    };
-    try vk.check_result(vk.vmaCreateImage(
-        self.vma_allocator,
-        &image_create_info,
-        &alloc_info,
-        &self.draw_image.image,
-        &self.draw_image.allocation,
-        null,
-    ));
-    const image_view_create_info = vk.VkImageViewCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .viewType = vk.VK_IMAGE_VIEW_TYPE_2D,
-        .image = self.draw_image.image,
-        .format = self.draw_image.format,
-        .subresourceRange = .{
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-            .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
-        },
-    };
-    try vk.check_result(vk.vkCreateImageView(
-        self.vk_logical_device.device,
-        &image_view_create_info,
-        null,
-        &self.draw_image.view,
-    ));
-
-    // Depth image
-    self.depth_image.format = vk.VK_FORMAT_D32_SFLOAT;
-    self.depth_image.extent = self.draw_image.extent;
-    const depth_image_usage = vk.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    const depth_image_create_info = vk.VkImageCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-        .imageType = vk.VK_IMAGE_TYPE_2D,
-        .format = self.depth_image.format,
-        .extent = self.depth_image.extent,
-        .usage = depth_image_usage,
-        .mipLevels = 1,
-        .arrayLayers = 1,
-        //for MSAA. we will not be using it by default, so default it to 1 sample per pixel.
-        .samples = vk.VK_SAMPLE_COUNT_1_BIT,
-        //optimal tiling, which means the image is stored on the best gpu format
-        .tiling = vk.VK_IMAGE_TILING_OPTIMAL,
-    };
-    const depth_alloc_info = vk.VmaAllocationCreateInfo{
-        .usage = vk.VMA_MEMORY_USAGE_GPU_ONLY,
-        .requiredFlags = vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-    };
-    try vk.check_result(vk.vmaCreateImage(
-        self.vma_allocator,
-        &depth_image_create_info,
-        &depth_alloc_info,
-        &self.depth_image.image,
-        &self.depth_image.allocation,
-        null,
-    ));
-
-    const depth_image_view_create_info = vk.VkImageViewCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-        .viewType = vk.VK_IMAGE_VIEW_TYPE_2D,
-        .image = self.depth_image.image,
-        .format = self.depth_image.format,
-        .subresourceRange = .{
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-            .aspectMask = vk.VK_IMAGE_ASPECT_DEPTH_BIT,
-        },
-    };
-    try vk.check_result(vk.vkCreateImageView(
-        self.vk_logical_device.device,
-        &depth_image_view_create_info,
-        null,
-        &self.depth_image.view,
-    ));
+    self.draw_image = try self.create_image(
+        self.vk_swap_chain.extent.width,
+        self.vk_swap_chain.extent.height,
+        vk.VK_FORMAT_R16G16B16A16_SFLOAT,
+        vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+            vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+            vk.VK_IMAGE_USAGE_STORAGE_BIT |
+            vk.VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+    );
+    self.depth_image = try self.create_image(
+        self.vk_swap_chain.extent.width,
+        self.vk_swap_chain.extent.height,
+        vk.VK_FORMAT_D32_SFLOAT,
+        vk.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+    );
 }
 
 pub fn recreate_swap_chain(self: *Self) !void {
@@ -1539,6 +1449,66 @@ pub fn create_buffer(self: *const Self, size: usize, usage: vk.VkBufferUsageFlag
         &new_buffer.allocation_info,
     ));
     return new_buffer;
+}
+
+pub fn create_image(self: *const Self, width: u32, height: u32, format: vk.VkFormat, usage: u32) !vk.AllocatedImage {
+    var image: vk.AllocatedImage = undefined;
+    image.extent = vk.VkExtent3D{
+        .width = width,
+        .height = height,
+        .depth = 1,
+    };
+    image.format = format;
+    const image_create_info = vk.VkImageCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+        .imageType = vk.VK_IMAGE_TYPE_2D,
+        .format = image.format,
+        .extent = image.extent,
+        .usage = usage,
+        .mipLevels = 1,
+        .arrayLayers = 1,
+        //for MSAA. we will not be using it by default, so default it to 1 sample per pixel.
+        .samples = vk.VK_SAMPLE_COUNT_1_BIT,
+        //optimal tiling, which means the image is stored on the best gpu format
+        .tiling = vk.VK_IMAGE_TILING_OPTIMAL,
+    };
+    const alloc_info = vk.VmaAllocationCreateInfo{
+        .usage = vk.VMA_MEMORY_USAGE_GPU_ONLY,
+        .requiredFlags = vk.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+    };
+    try vk.check_result(vk.vmaCreateImage(
+        self.vma_allocator,
+        &image_create_info,
+        &alloc_info,
+        &image.image,
+        &image.allocation,
+        null,
+    ));
+
+    const aspect_mask: u32 = if (usage & vk.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT != 0)
+        vk.VK_IMAGE_ASPECT_DEPTH_BIT
+    else
+        vk.VK_IMAGE_ASPECT_COLOR_BIT;
+    const image_view_create_info = vk.VkImageViewCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .viewType = vk.VK_IMAGE_VIEW_TYPE_2D,
+        .image = image.image,
+        .format = image.format,
+        .subresourceRange = .{
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+            .aspectMask = aspect_mask,
+        },
+    };
+    try vk.check_result(vk.vkCreateImageView(
+        self.vk_logical_device.device,
+        &image_view_create_info,
+        null,
+        &image.view,
+    ));
+    return image;
 }
 
 pub fn create_gpu_mesh(self: *const Self, indices: []const u32, vertices: []const Vertex) !GpuMesh {
