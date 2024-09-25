@@ -1665,7 +1665,7 @@ pub fn load_gltf_meshes(self: *Self, path: [:0]const u8) !void {
                         std.log.info("Tx_coord has components: {}", .{num_components});
                         std.debug.assert(num_components == 2);
 
-                        var uvs: []const Vec3 = undefined;
+                        var uvs: []const Vec2 = undefined;
                         uvs.ptr = @ptrCast(floats.ptr);
                         uvs.len = floats.len / 2;
 
