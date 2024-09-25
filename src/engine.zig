@@ -20,6 +20,16 @@ const VK_VALIDATION_LAYERS_NAMES = [_][]const u8{"VK_LAYER_KHRONOS_validation"};
 const VK_ADDITIONAL_EXTENSIONS_NAMES = [_][]const u8{"VK_EXT_debug_utils"};
 const VK_PHYSICAL_DEVICE_EXTENSION_NAMES = [_][]const u8{"VK_KHR_swapchain"};
 
+const Color = extern struct {
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+
+    pub const BLACK = Color{ .r = 0, .g = 0, .b = 0, .a = 255 };
+    pub const MAGENTA = Color{ .r = 255, .g = 0, .b = 255, .a = 255 };
+};
+
 const Vertex = extern struct {
     position: Vec3 = .{ .x = 0.0, .y = 0.0, .z = 0.0 },
     uv_x: f32 = 0.0,
@@ -164,6 +174,13 @@ mesh_pipeline: vk.VkPipeline = undefined,
 selected_mesh: i32 = 0,
 mesh_assets: std.ArrayListUnmanaged(MeshAsset) = undefined,
 
+checkerboard_image: vk.AllocatedImage = undefined,
+linear_sampler: vk.VkSampler = undefined,
+nearest_sampler: vk.VkSampler = undefined,
+
+texture_desc_set: vk.VkDescriptorSet = undefined,
+texture_desc_set_layout: vk.VkDescriptorSetLayout = undefined,
+
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
         return error.SDLInit;
@@ -219,9 +236,10 @@ pub fn init(allocator: Allocator) !Self {
 
     try self.create_swap_chain();
     try self.create_commands();
-    try self.create_descriptors();
-
     try self.create_immediate_objects();
+
+    try self.create_debug_image();
+    try self.create_descriptors();
 
     try self.create_compute_pipelines();
     try self.create_mesh_pipeline();
@@ -261,6 +279,10 @@ pub fn deinit(self: *Self) void {
 
     self.depth_image.deinit(self.vk_logical_device.device, self.vma_allocator);
     self.draw_image.deinit(self.vk_logical_device.device, self.vma_allocator);
+
+    self.checkerboard_image.deinit(self.vk_logical_device.device, self.vma_allocator);
+    vk.vkDestroySampler(self.vk_logical_device.device, self.nearest_sampler, null);
+    vk.vkDestroySampler(self.vk_logical_device.device, self.linear_sampler, null);
 
     vk.vmaDestroyAllocator(self.vma_allocator);
 
@@ -583,6 +605,17 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
 
     // Draw meshes
     vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.mesh_pipeline);
+
+    vk.vkCmdBindDescriptorSets(
+        buffer,
+        vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+        self.mesh_pipeline_layout,
+        0,
+        1,
+        &self.texture_desc_set,
+        0,
+        null,
+    );
 
     const view = Mat4.IDENDITY.translate(Vec3{ .x = 0.0, .y = 0.0, .z = -5.0 });
     var projection = Mat4.perspective(
@@ -1125,58 +1158,106 @@ pub fn create_commands(self: *Self) !void {
 }
 
 pub fn create_descriptors(self: *Self) !void {
-    const pool_size = vk.VkDescriptorPoolSize{
-        .type = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .descriptorCount = 1,
+    const pool_sizes = [_]vk.VkDescriptorPoolSize{
+        .{
+            .type = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .descriptorCount = 1,
+        },
+        .{
+            .type = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .descriptorCount = 1,
+        },
     };
     const pool_info = vk.VkDescriptorPoolCreateInfo{
         .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
         .maxSets = 10,
-        .pPoolSizes = &pool_size,
-        .poolSizeCount = 1,
+        .pPoolSizes = &pool_sizes,
+        .poolSizeCount = pool_sizes.len,
     };
     try vk.check_result(vk.vkCreateDescriptorPool(self.vk_logical_device.device, &pool_info, null, &self.vk_descriptor_pool));
 
-    const binging_layout = vk.VkDescriptorSetLayoutBinding{
-        .binding = 0,
-        .descriptorCount = 1,
-        .descriptorType = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .stageFlags = vk.VK_SHADER_STAGE_COMPUTE_BIT,
-    };
+    // Draw image set
+    {
+        const binging_layout = vk.VkDescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .stageFlags = vk.VK_SHADER_STAGE_COMPUTE_BIT,
+        };
+        const layout_create_info = vk.VkDescriptorSetLayoutCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .pBindings = &binging_layout,
+            .bindingCount = 1,
+        };
+        try vk.check_result(vk.vkCreateDescriptorSetLayout(
+            self.vk_logical_device.device,
+            &layout_create_info,
+            null,
+            &self.draw_image_desc_set_layout,
+        ));
+        const set_alloc_info = vk.VkDescriptorSetAllocateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = self.vk_descriptor_pool,
+            .pSetLayouts = &self.draw_image_desc_set_layout,
+            .descriptorSetCount = 1,
+        };
+        try vk.check_result(vk.vkAllocateDescriptorSets(self.vk_logical_device.device, &set_alloc_info, &self.draw_image_desc_set));
+        const desc_info = vk.VkDescriptorImageInfo{
+            .imageLayout = vk.VK_IMAGE_LAYOUT_GENERAL,
+            .imageView = self.draw_image.view,
+        };
+        const desc_image_write = vk.VkWriteDescriptorSet{
+            .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding = 0,
+            .dstSet = self.draw_image_desc_set,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .pImageInfo = &desc_info,
+        };
+        vk.vkUpdateDescriptorSets(self.vk_logical_device.device, 1, &desc_image_write, 0, null);
+    }
 
-    const layout_create_info = vk.VkDescriptorSetLayoutCreateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .pBindings = &binging_layout,
-        .bindingCount = 1,
-    };
-    try vk.check_result(vk.vkCreateDescriptorSetLayout(
-        self.vk_logical_device.device,
-        &layout_create_info,
-        null,
-        &self.draw_image_desc_set_layout,
-    ));
-
-    const set_alloc_info = vk.VkDescriptorSetAllocateInfo{
-        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-        .descriptorPool = self.vk_descriptor_pool,
-        .pSetLayouts = &self.draw_image_desc_set_layout,
-        .descriptorSetCount = 1,
-    };
-    try vk.check_result(vk.vkAllocateDescriptorSets(self.vk_logical_device.device, &set_alloc_info, &self.draw_image_desc_set));
-
-    const desc_image_info = vk.VkDescriptorImageInfo{
-        .imageLayout = vk.VK_IMAGE_LAYOUT_GENERAL,
-        .imageView = self.draw_image.view,
-    };
-    const desc_image_write = vk.VkWriteDescriptorSet{
-        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-        .dstBinding = 0,
-        .dstSet = self.draw_image_desc_set,
-        .descriptorCount = 1,
-        .descriptorType = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
-        .pImageInfo = &desc_image_info,
-    };
-    vk.vkUpdateDescriptorSets(self.vk_logical_device.device, 1, &desc_image_write, 0, null);
+    // Texture set
+    {
+        const binging_layout = vk.VkDescriptorSetLayoutBinding{
+            .binding = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+        };
+        const layout_create_info = vk.VkDescriptorSetLayoutCreateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .pBindings = &binging_layout,
+            .bindingCount = 1,
+        };
+        try vk.check_result(vk.vkCreateDescriptorSetLayout(
+            self.vk_logical_device.device,
+            &layout_create_info,
+            null,
+            &self.texture_desc_set_layout,
+        ));
+        const set_alloc_info = vk.VkDescriptorSetAllocateInfo{
+            .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+            .descriptorPool = self.vk_descriptor_pool,
+            .pSetLayouts = &self.texture_desc_set_layout,
+            .descriptorSetCount = 1,
+        };
+        try vk.check_result(vk.vkAllocateDescriptorSets(self.vk_logical_device.device, &set_alloc_info, &self.texture_desc_set));
+        const desc_image_info = vk.VkDescriptorImageInfo{
+            .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            .imageView = self.checkerboard_image.view,
+            .sampler = self.nearest_sampler,
+        };
+        const desc_image_write = vk.VkWriteDescriptorSet{
+            .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding = 0,
+            .dstSet = self.texture_desc_set,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo = &desc_image_info,
+        };
+        vk.vkUpdateDescriptorSets(self.vk_logical_device.device, 1, &desc_image_write, 0, null);
+    }
 }
 
 pub fn load_shader_module(self: *Self, path: []const u8) !vk.VkShaderModule {
@@ -1393,7 +1474,8 @@ pub fn init_imgui(self: *Self) !void {
 pub fn create_mesh_pipeline(self: *Self) !void {
     const vertex_shader_module = try self.load_shader_module("mesh_vert.spv");
     defer vk.vkDestroyShaderModule(self.vk_logical_device.device, vertex_shader_module, null);
-    const fragment_shader_module = try self.load_shader_module("mesh_frag.spv");
+    // const fragment_shader_module = try self.load_shader_module("mesh_frag.spv");
+    const fragment_shader_module = try self.load_shader_module("texture_frag.spv");
     defer vk.vkDestroyShaderModule(self.vk_logical_device.device, fragment_shader_module, null);
 
     const push_constant_range = vk.VkPushConstantRange{
@@ -1406,6 +1488,8 @@ pub fn create_mesh_pipeline(self: *Self) !void {
         .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pPushConstantRanges = &push_constant_range,
         .pushConstantRangeCount = 1,
+        .pSetLayouts = &self.texture_desc_set_layout,
+        .setLayoutCount = 1,
     };
     try vk.check_result(vk.vkCreatePipelineLayout(
         self.vk_logical_device.device,
@@ -1422,7 +1506,7 @@ pub fn create_mesh_pipeline(self: *Self) !void {
         .polygon_mode(vk.VK_POLYGON_MODE_FILL)
         .cull_mode(vk.VK_CULL_MODE_NONE, vk.VK_FRONT_FACE_CLOCKWISE)
         .multisampling_none()
-        .blending_additive()
+        .blending_alphablend()
         .color_attachment_format(self.draw_image.format)
         .depthtest(true, vk.VK_COMPARE_OP_GREATER_OR_EQUAL)
         .depth_format(self.depth_image.format)
@@ -1509,6 +1593,58 @@ pub fn create_image(self: *const Self, width: u32, height: u32, format: vk.VkFor
         &image.view,
     ));
     return image;
+}
+
+pub fn upload_image(self: *const Self, image: *const vk.AllocatedImage, data: []const u8, extent: vk.VkExtent3D) !void {
+    const buffer_size = extent.height * extent.width * extent.depth * @sizeOf(u32);
+    const staging_buffer = try self.create_buffer(
+        buffer_size,
+        vk.VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        vk.VMA_MEMORY_USAGE_CPU_TO_GPU,
+    );
+    defer vk.vmaDestroyBuffer(self.vma_allocator, staging_buffer.buffer, staging_buffer.allocation);
+
+    var buffer_slice: []u8 = undefined;
+    buffer_slice.ptr = @ptrCast(staging_buffer.allocation_info.pMappedData);
+    buffer_slice.len = buffer_size;
+    @memcpy(buffer_slice, data[0..buffer_size]);
+
+    {
+        try self.immediate_submit_begin();
+
+        vk.transition_image(
+            self.immediate_command_buffer,
+            image.image,
+            vk.VK_IMAGE_LAYOUT_UNDEFINED,
+            vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        );
+
+        const copy_region = vk.VkBufferImageCopy{
+            .imageExtent = extent,
+            .imageSubresource = .{
+                .layerCount = 1,
+                .aspectMask = vk.VK_IMAGE_ASPECT_COLOR_BIT,
+            },
+        };
+
+        vk.vkCmdCopyBufferToImage(
+            self.immediate_command_buffer,
+            staging_buffer.buffer,
+            image.image,
+            vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &copy_region,
+        );
+
+        vk.transition_image(
+            self.immediate_command_buffer,
+            image.image,
+            vk.VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        );
+
+        try self.immediate_submit_end();
+    }
 }
 
 pub fn create_gpu_mesh(self: *const Self, indices: []const u32, vertices: []const Vertex) !GpuMesh {
@@ -1692,4 +1828,43 @@ pub fn load_gltf_meshes(self: *Self, path: [:0]const u8) !void {
     }
 
     cgltf.cgltf_free(data);
+}
+
+pub fn create_debug_image(self: *Self) !void {
+    var arena = std.heap.ArenaAllocator.init(self.allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+
+    var checkerboard = try arena_allocator.alloc(Color, 16 * 16);
+    for (0..16) |x| {
+        for (0..16) |y| {
+            checkerboard[y * 16 + x] = if ((x % 2) ^ (y % 2) != 0) Color.MAGENTA else Color.BLACK;
+        }
+    }
+
+    var bytes: []const u8 = undefined;
+    bytes.ptr = @ptrCast(checkerboard.ptr);
+    bytes.len = checkerboard.len * @sizeOf(Color);
+
+    self.checkerboard_image = try self.create_image(
+        16,
+        16,
+        vk.VK_FORMAT_R8G8B8A8_UNORM,
+        vk.VK_IMAGE_USAGE_TRANSFER_DST_BIT | vk.VK_IMAGE_USAGE_SAMPLED_BIT,
+    );
+    try self.upload_image(&self.checkerboard_image, bytes, vk.VkExtent3D{ .width = 16, .height = 16, .depth = 1 });
+
+    const near_sampler = vk.VkSamplerCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = vk.VK_FILTER_NEAREST,
+        .minFilter = vk.VK_FILTER_NEAREST,
+    };
+    try vk.check_result(vk.vkCreateSampler(self.vk_logical_device.device, &near_sampler, null, &self.nearest_sampler));
+
+    const linear_sampler = vk.VkSamplerCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = vk.VK_FILTER_LINEAR,
+        .minFilter = vk.VK_FILTER_LINEAR,
+    };
+    try vk.check_result(vk.vkCreateSampler(self.vk_logical_device.device, &linear_sampler, null, &self.linear_sampler));
 }
