@@ -1474,7 +1474,6 @@ pub fn init_imgui(self: *Self) !void {
 pub fn create_mesh_pipeline(self: *Self) !void {
     const vertex_shader_module = try self.load_shader_module("mesh_vert.spv");
     defer vk.vkDestroyShaderModule(self.vk_logical_device.device, vertex_shader_module, null);
-    // const fragment_shader_module = try self.load_shader_module("mesh_frag.spv");
     const fragment_shader_module = try self.load_shader_module("texture_frag.spv");
     defer vk.vkDestroyShaderModule(self.vk_logical_device.device, fragment_shader_module, null);
 
