@@ -38,6 +38,40 @@ const Vertex = extern struct {
     color: Vec4 = .{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 0.0 },
 };
 
+const SceneData = extern struct {
+    view: Mat4,
+    projection: Mat4,
+    view_projection: Mat4,
+    ambient: Vec4,
+    sunlight_direction: Vec4,
+    sunlight_color: Vec4,
+};
+
+const MetallicRoughnessMaterial = struct {
+    pipeline_index: usize,
+    data_buffer: vk.AllocatedBuffer,
+    // color_image: vk.AllocatedImage,
+    // color_sampler: vk.VkSampler,
+    // metal_roughness_image: vk.AllocatedImage,
+    // metal_roughness_sampler: vk.VkSampler,
+    descriptor_set: vk.VkDescriptorSet,
+    descriptor_set_layout: vk.VkDescriptorSetLayout,
+
+    const Constants = extern struct {
+        color_factors: Vec4,
+        metal_roughness: Vec4,
+    };
+
+    pub fn deinit(self: *const MetallicRoughnessMaterial, device: vk.VkDevice, vma_allocator: vk.VmaAllocator) void {
+        vk.vmaDestroyBuffer(vma_allocator, self.data_buffer.buffer, self.data_buffer.allocation);
+        // self.color_image.deinit(device, vma_allocator);
+        // vk.vkDestroySampler(device, self.color_sampler, null);
+        // self.metal_roughness_image.deinit(device, vma_allocator);
+        // vk.vkDestroySampler(device, self.metal_roughness_sampler, null);
+        vk.vkDestroyDescriptorSetLayout(device, self.descriptor_set_layout, null);
+    }
+};
+
 const Pipeline = struct {
     name: [:0]const u8,
     pipeline: vk.VkPipeline,
@@ -170,7 +204,6 @@ immediate_command_buffer: vk.VkCommandBuffer = undefined,
 imgui_pool: vk.VkDescriptorPool = undefined,
 
 pipelines: std.ArrayListUnmanaged(Pipeline) = undefined,
-texture_pipeline_index: usize = undefined,
 
 selected_compute_data: i32 = 0,
 compute_data: [2]ComputeData = undefined,
@@ -182,8 +215,11 @@ checkerboard_image: vk.AllocatedImage = undefined,
 linear_sampler: vk.VkSampler = undefined,
 nearest_sampler: vk.VkSampler = undefined,
 
-texture_desc_set: vk.VkDescriptorSet = undefined,
-texture_desc_set_layout: vk.VkDescriptorSetLayout = undefined,
+scene_data_buffer: vk.AllocatedBuffer = undefined,
+scene_descriptor_set: vk.VkDescriptorSet = undefined,
+scene_descriptor_set_layout: vk.VkDescriptorSetLayout = undefined,
+
+metallic_material: MetallicRoughnessMaterial = undefined,
 
 pub fn init(allocator: Allocator) !Self {
     if (sdl.SDL_Init(sdl.SDL_INIT_VIDEO) != 0) {
@@ -246,7 +282,9 @@ pub fn init(allocator: Allocator) !Self {
     try self.create_descriptors();
 
     try self.create_compute_pipelines();
-    try self.create_mesh_pipeline();
+
+    try self.create_scene_buffer();
+    try self.create_metallic_material();
 
     try self.init_imgui();
 
@@ -265,6 +303,11 @@ pub fn deinit(self: *Self) void {
 
     vk.vkDestroyFence(self.vk_logical_device.device, self.immediate_fence, null);
     vk.vkDestroyCommandPool(self.vk_logical_device.device, self.immediate_command_pool, null);
+
+    self.metallic_material.deinit(self.vk_logical_device.device, self.vma_allocator);
+
+    vk.vmaDestroyBuffer(self.vma_allocator, self.scene_data_buffer.buffer, self.scene_data_buffer.allocation);
+    vk.vkDestroyDescriptorSetLayout(self.vk_logical_device.device, self.scene_descriptor_set_layout, null);
 
     for (self.mesh_assets.items) |asset| {
         asset.deinit(&self.allocator, self.vma_allocator);
@@ -608,20 +651,6 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
     vk.vkCmdSetScissor(buffer, 0, 1, &scissor);
 
     // Draw meshes
-    const mesh_pipeline = &self.pipelines.items[self.texture_pipeline_index];
-    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipeline.pipeline);
-
-    vk.vkCmdBindDescriptorSets(
-        buffer,
-        vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
-        mesh_pipeline.layout,
-        0,
-        1,
-        &self.texture_desc_set,
-        0,
-        null,
-    );
-
     const view = Mat4.IDENDITY.translate(Vec3{ .x = 0.0, .y = 0.0, .z = -5.0 });
     var projection = Mat4.perspective(
         std.math.degreesToRadians(70.0),
@@ -632,17 +661,45 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
     );
     projection.j.y *= -1.0;
 
+    const asset = self.mesh_assets.items[@intCast(self.selected_mesh)];
     var gpu_push_constatns = GpuPushConstants{
-        .world_matrix = view.mul(projection),
-        .device_address = undefined,
+        .world_matrix = Mat4.IDENDITY,
+        .device_address = asset.mesh.vertex_device_address,
     };
 
-    // Other meshes
-    const asset = self.mesh_assets.items[@intCast(self.selected_mesh)];
-    gpu_push_constatns.device_address = asset.mesh.vertex_device_address;
+    const scene_data: *SceneData = @alignCast(@ptrCast(self.scene_data_buffer.allocation_info.pMappedData));
+    scene_data.view = view;
+    scene_data.projection = projection;
+    scene_data.view_projection = view.mul(projection);
+    scene_data.ambient = Vec4{ .x = 1.0, .y = 1.0, .z = 1.0, .w = 1.0 };
+    scene_data.sunlight_color = Vec4{ .x = 1.0, .y = 1.0, .z = 1.0, .w = 1.0 };
+    scene_data.sunlight_direction = Vec4{ .x = 0.0, .y = 1.0, .z = 0.5, .w = 1.0 };
+
+    const p = &self.pipelines.items[self.metallic_material.pipeline_index];
+    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, p.pipeline);
+    vk.vkCmdBindDescriptorSets(
+        buffer,
+        vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+        p.layout,
+        0,
+        1,
+        &self.scene_descriptor_set,
+        0,
+        null,
+    );
+    vk.vkCmdBindDescriptorSets(
+        buffer,
+        vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
+        p.layout,
+        1,
+        1,
+        &self.metallic_material.descriptor_set,
+        0,
+        null,
+    );
     vk.vkCmdPushConstants(
         buffer,
-        mesh_pipeline.layout,
+        p.layout,
         vk.VK_SHADER_STAGE_VERTEX_BIT,
         0,
         @sizeOf(GpuPushConstants),
@@ -1170,7 +1227,11 @@ pub fn create_descriptors(self: *Self) !void {
         },
         .{
             .type = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .descriptorCount = 1,
+            .descriptorCount = 3,
+        },
+        .{
+            .type = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 2,
         },
     };
     const pool_info = vk.VkDescriptorPoolCreateInfo{
@@ -1218,48 +1279,6 @@ pub fn create_descriptors(self: *Self) !void {
             .descriptorCount = 1,
             .descriptorType = vk.VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             .pImageInfo = &desc_info,
-        };
-        vk.vkUpdateDescriptorSets(self.vk_logical_device.device, 1, &desc_image_write, 0, null);
-    }
-
-    // Texture set
-    {
-        const binging_layout = vk.VkDescriptorSetLayoutBinding{
-            .binding = 0,
-            .descriptorCount = 1,
-            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .stageFlags = vk.VK_SHADER_STAGE_FRAGMENT_BIT,
-        };
-        const layout_create_info = vk.VkDescriptorSetLayoutCreateInfo{
-            .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-            .pBindings = &binging_layout,
-            .bindingCount = 1,
-        };
-        try vk.check_result(vk.vkCreateDescriptorSetLayout(
-            self.vk_logical_device.device,
-            &layout_create_info,
-            null,
-            &self.texture_desc_set_layout,
-        ));
-        const set_alloc_info = vk.VkDescriptorSetAllocateInfo{
-            .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-            .descriptorPool = self.vk_descriptor_pool,
-            .pSetLayouts = &self.texture_desc_set_layout,
-            .descriptorSetCount = 1,
-        };
-        try vk.check_result(vk.vkAllocateDescriptorSets(self.vk_logical_device.device, &set_alloc_info, &self.texture_desc_set));
-        const desc_image_info = vk.VkDescriptorImageInfo{
-            .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            .imageView = self.checkerboard_image.view,
-            .sampler = self.nearest_sampler,
-        };
-        const desc_image_write = vk.VkWriteDescriptorSet{
-            .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-            .dstBinding = 0,
-            .dstSet = self.texture_desc_set,
-            .descriptorCount = 1,
-            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-            .pImageInfo = &desc_image_info,
         };
         vk.vkUpdateDescriptorSets(self.vk_logical_device.device, 1, &desc_image_write, 0, null);
     }
@@ -1492,10 +1511,154 @@ pub fn init_imgui(self: *Self) !void {
     _ = cimgui.ImGui_ImplVulkan_CreateFontsTexture();
 }
 
-pub fn create_mesh_pipeline(self: *Self) !void {
-    const vertex_shader_module = try self.load_shader_module("mesh_vert.spv");
+pub fn create_scene_buffer(self: *Self) !void {
+    const size = @sizeOf(SceneData);
+    self.scene_data_buffer = try self.create_buffer(
+        size,
+        vk.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        vk.VMA_MEMORY_USAGE_CPU_TO_GPU,
+    );
+
+    const binging_layout = vk.VkDescriptorSetLayoutBinding{
+        .binding = 0,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+    };
+    const layout_create_info = vk.VkDescriptorSetLayoutCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pBindings = &binging_layout,
+        .bindingCount = 1,
+    };
+    try vk.check_result(vk.vkCreateDescriptorSetLayout(
+        self.vk_logical_device.device,
+        &layout_create_info,
+        null,
+        &self.scene_descriptor_set_layout,
+    ));
+    const set_alloc_info = vk.VkDescriptorSetAllocateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = self.vk_descriptor_pool,
+        .pSetLayouts = &self.scene_descriptor_set_layout,
+        .descriptorSetCount = 1,
+    };
+    try vk.check_result(vk.vkAllocateDescriptorSets(self.vk_logical_device.device, &set_alloc_info, &self.scene_descriptor_set));
+    const desc_buffer_info = vk.VkDescriptorBufferInfo{
+        .buffer = self.scene_data_buffer.buffer,
+        .range = @sizeOf(SceneData),
+    };
+    const desc_buffer_write = vk.VkWriteDescriptorSet{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstBinding = 0,
+        .dstSet = self.scene_descriptor_set,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .pBufferInfo = &desc_buffer_info,
+    };
+    vk.vkUpdateDescriptorSets(self.vk_logical_device.device, 1, &desc_buffer_write, 0, null);
+}
+
+pub fn create_metallic_material(self: *Self) !void {
+    // create material data uniform buffer
+    const size = @sizeOf(MetallicRoughnessMaterial.Constants);
+    self.metallic_material.data_buffer = try self.create_buffer(
+        size,
+        vk.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        vk.VMA_MEMORY_USAGE_CPU_TO_GPU,
+    );
+
+    const material_data: *MetallicRoughnessMaterial.Constants = @alignCast(
+        @ptrCast(self.metallic_material.data_buffer.allocation_info.pMappedData),
+    );
+    material_data.color_factors = Vec4{ .x = 1.0, .y = 1.0, .z = 1.0, .w = 1.0 };
+    material_data.metal_roughness = Vec4{ .x = 1.0, .y = 1.0, .z = 1.0, .w = 1.0 };
+
+    // create descriptor set layout
+    const bingings = [_]vk.VkDescriptorSetLayoutBinding{
+        .{
+            .binding = 0,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        .{
+            .binding = 1,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+        .{
+            .binding = 2,
+            .descriptorCount = 1,
+            .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT | vk.VK_SHADER_STAGE_FRAGMENT_BIT,
+        },
+    };
+    const layout_create_info = vk.VkDescriptorSetLayoutCreateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .pBindings = &bingings,
+        .bindingCount = bingings.len,
+    };
+    try vk.check_result(vk.vkCreateDescriptorSetLayout(
+        self.vk_logical_device.device,
+        &layout_create_info,
+        null,
+        &self.metallic_material.descriptor_set_layout,
+    ));
+
+    // create descriptor set
+    const set_alloc_info = vk.VkDescriptorSetAllocateInfo{
+        .sType = vk.VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = self.vk_descriptor_pool,
+        .pSetLayouts = &self.metallic_material.descriptor_set_layout,
+        .descriptorSetCount = 1,
+    };
+    try vk.check_result(vk.vkAllocateDescriptorSets(
+        self.vk_logical_device.device,
+        &set_alloc_info,
+        &self.metallic_material.descriptor_set,
+    ));
+
+    // update descriptor set
+    const desc_buffer_info = vk.VkDescriptorBufferInfo{
+        .buffer = self.metallic_material.data_buffer.buffer,
+        .range = @sizeOf(MetallicRoughnessMaterial.Constants),
+    };
+    const desc_buffer_write = vk.VkWriteDescriptorSet{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstBinding = 0,
+        .dstSet = self.metallic_material.descriptor_set,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .pBufferInfo = &desc_buffer_info,
+    };
+    const desc_image_info = vk.VkDescriptorImageInfo{
+        .imageLayout = vk.VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .imageView = self.checkerboard_image.view,
+        .sampler = self.nearest_sampler,
+    };
+    const desc_image_write = vk.VkWriteDescriptorSet{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstBinding = 1,
+        .dstSet = self.metallic_material.descriptor_set,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = &desc_image_info,
+    };
+    const desc_image_write_2 = vk.VkWriteDescriptorSet{
+        .sType = vk.VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstBinding = 2,
+        .dstSet = self.metallic_material.descriptor_set,
+        .descriptorCount = 1,
+        .descriptorType = vk.VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo = &desc_image_info,
+    };
+    const updates = [_]vk.VkWriteDescriptorSet{ desc_buffer_write, desc_image_write, desc_image_write_2 };
+    vk.vkUpdateDescriptorSets(self.vk_logical_device.device, updates.len, @ptrCast(&updates), 0, null);
+
+    const vertex_shader_module = try self.load_shader_module("metallic_vert.spv");
     defer vk.vkDestroyShaderModule(self.vk_logical_device.device, vertex_shader_module, null);
-    const fragment_shader_module = try self.load_shader_module("texture_frag.spv");
+    const fragment_shader_module = try self.load_shader_module("metallic_frag.spv");
     defer vk.vkDestroyShaderModule(self.vk_logical_device.device, fragment_shader_module, null);
 
     const push_constant_range = vk.VkPushConstantRange{
@@ -1505,18 +1668,22 @@ pub fn create_mesh_pipeline(self: *Self) !void {
     };
 
     var new_pipeline: Pipeline = undefined;
-    new_pipeline.name = "texture";
+    new_pipeline.name = "metallic";
 
-    const layout_create_info = vk.VkPipelineLayoutCreateInfo{
+    const layouts = [_]vk.VkDescriptorSetLayout{
+        self.scene_descriptor_set_layout,
+        self.metallic_material.descriptor_set_layout,
+    };
+    const pipeline_layout_create_info = vk.VkPipelineLayoutCreateInfo{
         .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pPushConstantRanges = &push_constant_range,
         .pushConstantRangeCount = 1,
-        .pSetLayouts = &self.texture_desc_set_layout,
-        .setLayoutCount = 1,
+        .pSetLayouts = &layouts,
+        .setLayoutCount = layouts.len,
     };
     try vk.check_result(vk.vkCreatePipelineLayout(
         self.vk_logical_device.device,
-        &layout_create_info,
+        &pipeline_layout_create_info,
         null,
         &new_pipeline.layout,
     ));
@@ -1535,7 +1702,7 @@ pub fn create_mesh_pipeline(self: *Self) !void {
         .depth_format(self.depth_image.format)
         .build(self.vk_logical_device.device);
 
-    self.texture_pipeline_index = self.pipelines.items.len;
+    self.metallic_material.pipeline_index = self.pipelines.items.len;
     try self.pipelines.append(self.allocator, new_pipeline);
 }
 
