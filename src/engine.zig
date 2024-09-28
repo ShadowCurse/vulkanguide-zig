@@ -38,6 +38,17 @@ const Vertex = extern struct {
     color: Vec4 = .{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 0.0 },
 };
 
+const Pipeline = struct {
+    name: [:0]const u8,
+    pipeline: vk.VkPipeline,
+    layout: vk.VkPipelineLayout,
+
+    pub fn deinit(self: *const Pipeline, device: vk.VkDevice) void {
+        vk.vkDestroyPipelineLayout(device, self.layout, null);
+        vk.vkDestroyPipeline(device, self.pipeline, null);
+    }
+};
+
 const MeshAsset = struct {
     name: [:0]const u8,
     surfaces: []SurfaceInfo,
@@ -79,15 +90,8 @@ const ComputePushConstants = extern struct {
 };
 
 const ComputeData = struct {
-    name: [:0]const u8,
     constants: ComputePushConstants,
-    pipeline: vk.VkPipeline,
-    layout: vk.VkPipelineLayout,
-
-    pub fn deinit(self: *const ComputeData, device: vk.VkDevice) void {
-        vk.vkDestroyPipelineLayout(device, self.layout, null);
-        vk.vkDestroyPipeline(device, self.pipeline, null);
-    }
+    pipeline_index: usize,
 };
 
 const PhysicalDevice = struct {
@@ -165,11 +169,11 @@ immediate_command_buffer: vk.VkCommandBuffer = undefined,
 
 imgui_pool: vk.VkDescriptorPool = undefined,
 
+pipelines: std.ArrayListUnmanaged(Pipeline) = undefined,
+texture_pipeline_index: usize = undefined,
+
 selected_compute_data: i32 = 0,
 compute_data: [2]ComputeData = undefined,
-
-mesh_pipeline_layout: vk.VkPipelineLayout = undefined,
-mesh_pipeline: vk.VkPipeline = undefined,
 
 selected_mesh: i32 = 0,
 mesh_assets: std.ArrayListUnmanaged(MeshAsset) = undefined,
@@ -267,12 +271,10 @@ pub fn deinit(self: *Self) void {
     }
     self.mesh_assets.deinit(self.allocator);
 
-    vk.vkDestroyPipelineLayout(self.vk_logical_device.device, self.mesh_pipeline_layout, null);
-    vk.vkDestroyPipeline(self.vk_logical_device.device, self.mesh_pipeline, null);
-
-    for (self.compute_data) |data| {
-        data.deinit(self.vk_logical_device.device);
+    for (self.pipelines.items) |pipeline| {
+        pipeline.deinit(self.vk_logical_device.device);
     }
+    self.pipelines.deinit(self.allocator);
 
     vk.vkDestroyDescriptorSetLayout(self.vk_logical_device.device, self.draw_image_desc_set_layout, null);
     vk.vkDestroyDescriptorPool(self.vk_logical_device.device, self.vk_descriptor_pool, null);
@@ -325,8 +327,9 @@ pub fn run(self: *Self) !void {
         var open = true;
         if (cimgui.igBegin("Parameters", &open, 0)) {
             const current_compute_data = &self.compute_data[@intCast(self.selected_compute_data)];
+            const current_pipeline = &self.pipelines.items[current_compute_data.pipeline_index];
 
-            _ = cimgui.igText("Shader name: %s", current_compute_data.name.ptr);
+            _ = cimgui.igText("Pipeline name: %s", current_pipeline.name.ptr);
 
             _ = cimgui.igSliderInt("Shader index", &self.selected_compute_data, 0, self.compute_data.len - 1, null, 0);
 
@@ -528,11 +531,12 @@ pub fn run(self: *Self) !void {
 
 pub fn draw_background(self: *const Self, buffer: vk.VkCommandBuffer) void {
     const current_compute_data = &self.compute_data[@intCast(self.selected_compute_data)];
-    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, current_compute_data.pipeline);
+    const current_pipeline = &self.pipelines.items[current_compute_data.pipeline_index];
+    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_COMPUTE, current_pipeline.pipeline);
     vk.vkCmdBindDescriptorSets(
         buffer,
         vk.VK_PIPELINE_BIND_POINT_COMPUTE,
-        current_compute_data.layout,
+        current_pipeline.layout,
         0,
         1,
         &self.draw_image_desc_set,
@@ -541,7 +545,7 @@ pub fn draw_background(self: *const Self, buffer: vk.VkCommandBuffer) void {
     );
     vk.vkCmdPushConstants(
         buffer,
-        current_compute_data.layout,
+        current_pipeline.layout,
         vk.VK_SHADER_STAGE_COMPUTE_BIT,
         0,
         @sizeOf(ComputePushConstants),
@@ -604,12 +608,13 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
     vk.vkCmdSetScissor(buffer, 0, 1, &scissor);
 
     // Draw meshes
-    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, self.mesh_pipeline);
+    const mesh_pipeline = &self.pipelines.items[self.texture_pipeline_index];
+    vk.vkCmdBindPipeline(buffer, vk.VK_PIPELINE_BIND_POINT_GRAPHICS, mesh_pipeline.pipeline);
 
     vk.vkCmdBindDescriptorSets(
         buffer,
         vk.VK_PIPELINE_BIND_POINT_GRAPHICS,
-        self.mesh_pipeline_layout,
+        mesh_pipeline.layout,
         0,
         1,
         &self.texture_desc_set,
@@ -637,7 +642,7 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
     gpu_push_constatns.device_address = asset.mesh.vertex_device_address;
     vk.vkCmdPushConstants(
         buffer,
-        self.mesh_pipeline_layout,
+        mesh_pipeline.layout,
         vk.VK_SHADER_STAGE_VERTEX_BIT,
         0,
         @sizeOf(GpuPushConstants),
@@ -1290,21 +1295,23 @@ pub fn create_compute_pipelines(self: *Self) !void {
         .pPushConstantRanges = &compute_push_constants,
         .pushConstantRangeCount = 1,
     };
-    for (&self.compute_data) |*data| {
-        try vk.check_result(vk.vkCreatePipelineLayout(
-            self.vk_logical_device.device,
-            &compute_layout_create_info,
-            null,
-            &data.layout,
-        ));
-    }
 
     {
-        self.compute_data[0].name = "gradient";
+        self.compute_data[0].pipeline_index = self.pipelines.items.len;
         self.compute_data[0].constants = .{
             .data1 = .{ .x = 1.0, .y = 0.0, .z = 0.0, .w = 1.0 },
             .data2 = .{ .x = 0.0, .y = 0.0, .z = 1.0, .w = 1.0 },
         };
+
+        var new_pipeline: Pipeline = undefined;
+        new_pipeline.name = "gradient";
+
+        try vk.check_result(vk.vkCreatePipelineLayout(
+            self.vk_logical_device.device,
+            &compute_layout_create_info,
+            null,
+            &new_pipeline.layout,
+        ));
 
         const gradient_shader_module = try self.load_shader_module("gradient.spv");
         defer vk.vkDestroyShaderModule(self.vk_logical_device.device, gradient_shader_module, null);
@@ -1317,7 +1324,7 @@ pub fn create_compute_pipelines(self: *Self) !void {
         };
         const compute_pipeline_create_info = vk.VkComputePipelineCreateInfo{
             .sType = vk.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-            .layout = self.compute_data[0].layout,
+            .layout = new_pipeline.layout,
             .stage = shader_stage_create_info,
         };
         try vk.check_result(vk.vkCreateComputePipelines(
@@ -1326,15 +1333,27 @@ pub fn create_compute_pipelines(self: *Self) !void {
             1,
             &compute_pipeline_create_info,
             null,
-            &self.compute_data[0].pipeline,
+            &new_pipeline.pipeline,
         ));
+
+        try self.pipelines.append(self.allocator, new_pipeline);
     }
 
     {
-        self.compute_data[1].name = "sky";
+        self.compute_data[1].pipeline_index = self.pipelines.items.len;
         self.compute_data[1].constants = .{
             .data1 = .{ .x = 0.1, .y = 0.2, .z = 0.4, .w = 0.999 },
         };
+
+        var new_pipeline: Pipeline = undefined;
+        new_pipeline.name = "sky";
+
+        try vk.check_result(vk.vkCreatePipelineLayout(
+            self.vk_logical_device.device,
+            &compute_layout_create_info,
+            null,
+            &new_pipeline.layout,
+        ));
 
         const sky_shader_module = try self.load_shader_module("sky.spv");
         defer vk.vkDestroyShaderModule(self.vk_logical_device.device, sky_shader_module, null);
@@ -1347,7 +1366,7 @@ pub fn create_compute_pipelines(self: *Self) !void {
         };
         const compute_pipeline_create_info = vk.VkComputePipelineCreateInfo{
             .sType = vk.VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-            .layout = self.compute_data[1].layout,
+            .layout = new_pipeline.layout,
             .stage = shader_stage_create_info,
         };
         try vk.check_result(vk.vkCreateComputePipelines(
@@ -1356,8 +1375,10 @@ pub fn create_compute_pipelines(self: *Self) !void {
             1,
             &compute_pipeline_create_info,
             null,
-            &self.compute_data[1].pipeline,
+            &new_pipeline.pipeline,
         ));
+
+        try self.pipelines.append(self.allocator, new_pipeline);
     }
 }
 
@@ -1483,6 +1504,9 @@ pub fn create_mesh_pipeline(self: *Self) !void {
         .stageFlags = vk.VK_SHADER_STAGE_VERTEX_BIT,
     };
 
+    var new_pipeline: Pipeline = undefined;
+    new_pipeline.name = "texture";
+
     const layout_create_info = vk.VkPipelineLayoutCreateInfo{
         .sType = vk.VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
         .pPushConstantRanges = &push_constant_range,
@@ -1494,12 +1518,12 @@ pub fn create_mesh_pipeline(self: *Self) !void {
         self.vk_logical_device.device,
         &layout_create_info,
         null,
-        &self.mesh_pipeline_layout,
+        &new_pipeline.layout,
     ));
 
     var builder: vk.PipelineBuilder = .{};
-    self.mesh_pipeline = try builder
-        .layout(self.mesh_pipeline_layout)
+    new_pipeline.pipeline = try builder
+        .layout(new_pipeline.layout)
         .shaders(vertex_shader_module, fragment_shader_module)
         .input_topology(vk.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
         .polygon_mode(vk.VK_POLYGON_MODE_FILL)
@@ -1510,6 +1534,9 @@ pub fn create_mesh_pipeline(self: *Self) !void {
         .depthtest(true, vk.VK_COMPARE_OP_GREATER_OR_EQUAL)
         .depth_format(self.depth_image.format)
         .build(self.vk_logical_device.device);
+
+    self.texture_pipeline_index = self.pipelines.items.len;
+    try self.pipelines.append(self.allocator, new_pipeline);
 }
 
 pub fn create_buffer(self: *const Self, size: usize, usage: vk.VkBufferUsageFlags, memory_usage: vk.VmaMemoryUsage) !vk.AllocatedBuffer {
