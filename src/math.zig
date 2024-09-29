@@ -22,6 +22,34 @@ pub const Vec3 = extern struct {
         return .{ .x = self.x, .y = self.y, .z = self.z, .w = w };
     }
 
+    pub inline fn add(self: Vec3, other: Vec3) Vec3 {
+        return .{
+            .x = self.x + other.x,
+            .y = self.y + other.y,
+            .z = self.z + other.z,
+        };
+    }
+
+    pub inline fn squared_norm(self: Vec3) f32 {
+        return self.x * self.x + self.y * self.y + self.z * self.z;
+    }
+
+    pub inline fn mul(self: Vec3, n: f32) Vec3 {
+        return .{
+            .x = self.x * n,
+            .y = self.y * n,
+            .z = self.z * n,
+        };
+    }
+
+    pub inline fn div(self: Vec3, n: f32) Vec3 {
+        return .{
+            .x = self.x / n,
+            .y = self.y / n,
+            .z = self.z / n,
+        };
+    }
+
     pub inline fn dot(self: Vec3, other: Vec3) f32 {
         return self.x * other.x + self.y * other.y + self.z * other.z;
     }
@@ -37,12 +65,29 @@ pub const Vec4 = extern struct {
         return self.x == other.x and self.y == other.y and self.z == other.z and self.w == other.w;
     }
 
+    pub inline fn shrink(self: Vec4) Vec3 {
+        return .{
+            .x = self.x,
+            .y = self.y,
+            .z = self.z,
+        };
+    }
+
     pub inline fn add(self: Vec4, other: Vec4) Vec4 {
         return .{
             .x = self.x + other.x,
             .y = self.y + other.y,
             .z = self.z + other.z,
             .w = self.w + other.w,
+        };
+    }
+
+    pub inline fn mul(self: Vec4, n: f32) Vec4 {
+        return .{
+            .x = self.x * n,
+            .y = self.y * n,
+            .z = self.z * n,
+            .w = self.w * n,
         };
     }
 
@@ -81,6 +126,40 @@ pub const Mat4 = extern struct {
             .j = .{ .y = f },
             .k = .{ .z = far / (near - far), .w = -1.0 },
             .t = .{ .z = -(far * near) / (far - near), .w = 0.0 },
+        };
+    }
+
+    pub fn rotation(axis: Vec3, angle: f32) Mat4 {
+        const c = @cos(angle);
+        const s = @sin(angle);
+        const t = 1.0 - c;
+
+        const sqr_norm = axis.squared_norm();
+        if (sqr_norm == 0.0) {
+            return Mat4.IDENDITY;
+        } else if (@abs(sqr_norm - 1.0) > 0.0001) {
+            const norm = @sqrt(sqr_norm);
+            return rotation(axis.div(norm), angle);
+        }
+
+        const x = axis.x;
+        const y = axis.y;
+        const z = axis.z;
+
+        return .{
+            .i = .{ .x = x * x * t + c, .y = y * x * t + z * s, .z = z * x * t - y * s, .w = 0.0 },
+            .j = .{ .x = x * y * t - z * s, .y = y * y * t + c, .z = z * y * t + x * s, .w = 0.0 },
+            .k = .{ .x = x * z * t + y * s, .y = y * z * t - x * s, .z = z * z * t + c, .w = 0.0 },
+            .t = .{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 1.0 },
+        };
+    }
+
+    pub inline fn mul_vec4(self: Mat4, v: Vec4) Vec4 {
+        return .{
+            .x = self.i.dot(v),
+            .y = self.j.dot(v),
+            .z = self.k.dot(v),
+            .w = self.t.dot(v),
         };
     }
 

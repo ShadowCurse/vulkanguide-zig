@@ -8,6 +8,8 @@ const math = @import("math.zig");
 const Vec2 = math.Vec2;
 const Vec3 = math.Vec3;
 const Vec4 = math.Vec4;
+const Quat = math.Quat;
+const Mat3 = math.Mat3;
 const Mat4 = math.Mat4;
 
 const Allocator = std.mem.Allocator;
@@ -36,6 +38,63 @@ const Vertex = extern struct {
     normal: Vec3 = .{ .x = 0.0, .y = 0.0, .z = 0.0 },
     uv_y: f32 = 0.0,
     color: Vec4 = .{ .x = 0.0, .y = 0.0, .z = 0.0, .w = 0.0 },
+};
+
+const CameraController = struct {
+    velocity: Vec3 = .{},
+    position: Vec3 = .{ .x = 0.0, .y = 0.0, .z = -5.0 },
+    pitch: f32 = 0.0,
+    yaw: f32 = 0.0,
+    active: bool = false,
+
+    pub fn process_input(self: *CameraController, event: *sdl.SDL_Event, dt: f32) void {
+        if (event.type == sdl.SDL_KEYDOWN) {
+            switch (event.key.keysym.sym) {
+                sdl.SDLK_w => self.velocity.z = 1.0,
+                sdl.SDLK_s => self.velocity.z = -1.0,
+                sdl.SDLK_a => self.velocity.x = 1.0,
+                sdl.SDLK_d => self.velocity.x = -1.0,
+                else => {},
+            }
+        }
+
+        if (event.type == sdl.SDL_KEYUP) {
+            switch (event.key.keysym.sym) {
+                sdl.SDLK_w => self.velocity.z = 0,
+                sdl.SDLK_s => self.velocity.z = 0,
+                sdl.SDLK_a => self.velocity.x = 0,
+                sdl.SDLK_d => self.velocity.x = 0,
+                else => {},
+            }
+        }
+
+        if (event.type == sdl.SDL_MOUSEBUTTONDOWN) {
+            self.active = true;
+        }
+        if (event.type == sdl.SDL_MOUSEBUTTONUP) {
+            self.active = false;
+        }
+
+        if (self.active and event.type == sdl.SDL_MOUSEMOTION) {
+            self.yaw += @as(f32, @floatFromInt(event.motion.xrel)) * dt;
+            self.pitch -= @as(f32, @floatFromInt(event.motion.yrel)) * dt;
+        }
+
+        const rotation = self.rotation_matrix();
+        const delta = rotation.mul_vec4(self.velocity.mul(dt).extend(1.0));
+        self.position = self.position.add(delta.shrink());
+    }
+
+    pub fn view_matrix(self: *const CameraController) Mat4 {
+        const translation = Mat4.IDENDITY.translate(self.position);
+        const rotation = self.rotation_matrix();
+        return translation.mul(rotation);
+    }
+
+    pub fn rotation_matrix(self: *const CameraController) Mat4 {
+        return Mat4.rotation(Vec3{ .x = 0.0, .y = 1.0, .z = 0.0 }, self.yaw)
+            .mul(Mat4.rotation(Vec3{ .x = -1.0, .y = 0.0, .z = 0.0 }, self.pitch));
+    }
 };
 
 const SceneData = extern struct {
@@ -191,6 +250,8 @@ vk_logical_device: LogicalDevice = undefined,
 vk_swap_chain: Swapchain = undefined,
 vk_commands: [FRAMES]Commands = undefined,
 vk_descriptor_pool: vk.VkDescriptorPool = undefined,
+
+camera_controller: CameraController = .{},
 
 draw_image: vk.AllocatedImage = undefined,
 depth_image: vk.AllocatedImage = undefined,
@@ -352,14 +413,19 @@ pub fn current_frame_command(self: *Self) *Commands {
 
 pub fn run(self: *Self) !void {
     var stop = false;
+    var t = std.time.nanoTimestamp();
     while (!stop) {
+        const new_t = std.time.nanoTimestamp();
+        const dt = @as(f32, @floatFromInt(new_t - t)) / 1000_000_000.0;
+        t = new_t;
+
         var sdl_event: sdl.SDL_Event = undefined;
         while (sdl.SDL_PollEvent(&sdl_event) != 0) {
             if (sdl_event.type == sdl.SDL_QUIT) {
                 stop = true;
                 break;
             }
-
+            self.camera_controller.process_input(&sdl_event, dt);
             _ = cimgui.ImGui_ImplSDL2_ProcessEvent(@ptrCast(&sdl_event));
         }
 
@@ -651,7 +717,7 @@ pub fn draw_geometry(self: *const Self, buffer: vk.VkCommandBuffer) void {
     vk.vkCmdSetScissor(buffer, 0, 1, &scissor);
 
     // Draw meshes
-    const view = Mat4.IDENDITY.translate(Vec3{ .x = 0.0, .y = 0.0, .z = -5.0 });
+    const view = self.camera_controller.view_matrix();
     var projection = Mat4.perspective(
         std.math.degreesToRadians(70.0),
         @as(f32, @floatFromInt(self.draw_image.extent.width)) /
